@@ -1,0 +1,405 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
+
+import 'package:fqapp/models/media_item.dart';
+import 'package:fqapp/pages/home_page.dart';
+import 'package:fqapp/pages/home_provider.dart';
+import 'package:fqapp/services/api_client.dart';
+import 'package:fqapp/widgets/home/home_design.dart';
+
+void main() {
+  testWidgets(
+    'manju, manga and audio tabs show the matching feed after insertion',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(320, 850));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      addTearDown(() => tester.pumpWidget(const SizedBox.shrink()));
+      MediaItem item(String label) => MediaItem(
+        id: label,
+        title: '$label 作品',
+        cover: '',
+        author: '',
+        badge: '',
+        ep: '',
+        kind: HomeNotifier.tabKinds[label]!,
+      );
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            homeProvider.overrideWith(
+              () => HomeNotifier(
+                homepageLoader:
+                    ({
+                      int tabType = 2,
+                      int offset = 0,
+                      String? sessionId,
+                    }) async => HomepagePage(
+                      items: [
+                        item(
+                          HomeNotifier.tabTypes.entries
+                              .firstWhere((entry) => entry.value == tabType)
+                              .key,
+                        ),
+                      ],
+                      nextOffset: null,
+                      sessionId: null,
+                    ),
+                searchLoader: (query, {int page = 1}) async => [
+                  SearchTab(title: query, items: [item(query)], hasMore: false),
+                ],
+              ),
+            ),
+          ],
+          child: const MaterialApp(home: HomePage()),
+        ),
+      );
+      await tester.pumpAndSettle();
+      for (final label in ['漫剧', '漫画', '听书']) {
+        final index = HomeNotifier.tabs.indexOf(label);
+        final tab = find.byKey(ValueKey('home_category_$index'));
+        await tester.ensureVisible(tab);
+        await tester.pumpAndSettle();
+        await tester.tap(tab);
+        await tester.pumpAndSettle();
+        expect(find.text('$label 作品'), findsOneWidget);
+        if (label == '漫剧') expect(find.text('观看漫剧'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      }
+    },
+  );
+
+  for (final scale in [1.0, 1.8]) {
+    testWidgets('search hint fits a narrow phone at text scale $scale', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(320, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      addTearDown(() => tester.pumpWidget(const SizedBox.shrink()));
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            homeProvider.overrideWith(
+              () => HomeNotifier(
+                homepageLoader:
+                    ({
+                      int tabType = 2,
+                      int offset = 0,
+                      String? sessionId,
+                    }) async => HomepagePage(
+                      items: [],
+                      nextOffset: null,
+                      sessionId: null,
+                    ),
+                searchLoader: (query, {int page = 1}) async => [],
+              ),
+            ),
+          ],
+          child: MaterialApp(
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(
+                context,
+              ).copyWith(textScaler: TextScaler.linear(scale)),
+              child: child!,
+            ),
+            home: const HomePage(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final hint = find.text('搜索你想看的故事');
+      expect(hint, findsOneWidget);
+      expect(
+        tester.getRect(hint).right,
+        lessThanOrEqualTo(
+          tester.getRect(find.byIcon(LucideIcons.refresh_ccw)).left,
+        ),
+      );
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets('a long homepage error can be scrolled to retry successfully', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(320, 600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    addTearDown(() => tester.pumpWidget(const SizedBox.shrink()));
+    final message = List.filled(60, '服务暂时不可用，请稍后重试。').join();
+    var failing = true;
+    var homepageRequests = 0;
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          homeProvider.overrideWith(
+            () => HomeNotifier(
+              homepageLoader:
+                  ({int tabType = 2, int offset = 0, String? sessionId}) async {
+                    // Count the novel stream only: the combined feed also asks
+                    // the manju stream (24) for its manju group, which is not
+                    // what this retry assertion is about.
+                    if (tabType == 2) homepageRequests++;
+                    if (failing) throw ApiException(message);
+                    return const HomepagePage(
+                      items: [],
+                      nextOffset: null,
+                      sessionId: null,
+                    );
+                  },
+              searchLoader: (query, {int page = 1}) async {
+                if (failing) throw ApiException(message);
+                return [];
+              },
+            ),
+          ),
+        ],
+        child: MaterialApp(
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(
+              context,
+            ).copyWith(textScaler: const TextScaler.linear(1.8)),
+            child: child!,
+          ),
+          home: const HomePage(),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text(message), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    final scrollable = find.descendant(
+      of: find.byType(SingleChildScrollView),
+      matching: find.byType(Scrollable),
+    );
+    expect(
+      tester.state<ScrollableState>(scrollable).position.maxScrollExtent,
+      greaterThan(0),
+    );
+    expect(find.text('重试').hitTestable(), findsNothing);
+    await tester.scrollUntilVisible(
+      find.text('重试'),
+      400,
+      scrollable: scrollable,
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('重试').hitTestable(), findsOneWidget);
+
+    failing = false;
+    await tester.tap(find.text('重试'));
+    await tester.pumpAndSettle();
+    expect(homepageRequests, 2);
+    expect(find.text('暂无内容'), findsOneWidget);
+    expect(find.text(message), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('two initial empty pages continue loading until items appear', (
+    tester,
+  ) async {
+    final offsets = <int>[];
+    final secondPage = Completer<HomepagePage>();
+    addTearDown(() => tester.pumpWidget(const SizedBox.shrink()));
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          homeProvider.overrideWith(
+            () => HomeNotifier(
+              homepageLoader:
+                  ({int tabType = 2, int offset = 0, String? sessionId}) async {
+                    // Manju has its own stream (24) in the combined feed; keep
+                    // it out of this test's cursor tracking.
+                    if (tabType != 2) {
+                      return const HomepagePage(
+                        items: [],
+                        nextOffset: null,
+                        sessionId: null,
+                      );
+                    }
+                    offsets.add(offset);
+                    if (offset == 1) return secondPage.future;
+                    return HomepagePage(
+                      items: [
+                        if (offset == 2)
+                          MediaItem(
+                            id: 'later-book',
+                            title: '后续小说',
+                            cover: '',
+                            author: '',
+                            badge: '',
+                            ep: '',
+                            kind: 'book',
+                          ),
+                      ],
+                      nextOffset: offset == 0 ? 1 : null,
+                      sessionId: 'session',
+                    );
+                  },
+              searchLoader: (query, {int page = 1}) async => [],
+            ),
+          ),
+        ],
+        child: const MaterialApp(home: HomePage()),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    expect(offsets, [0, 1]);
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    expect(find.text('暂无内容'), findsNothing);
+
+    secondPage.complete(
+      HomepagePage(items: [], nextOffset: 2, sessionId: 'session'),
+    );
+    await tester.pump();
+    await tester.pump();
+    expect(offsets, [0, 1]);
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    await tester.pump(const Duration(milliseconds: 500));
+    await tester.pumpAndSettle();
+    expect(offsets, [0, 1, 2]);
+    expect(find.text('后续小说'), findsOneWidget);
+    expect(find.text('暂无内容'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('short fast pages continue loading without a scroll event', (
+    tester,
+  ) async {
+    final offsets = <int>[];
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          homeProvider.overrideWith(
+            () => HomeNotifier(
+              homepageLoader:
+                  ({int tabType = 2, int offset = 0, String? sessionId}) async {
+                    // The combined feed also reads the manju stream (24) for its
+                    // manju group; keep it empty so this test tracks the novel
+                    // stream's cursor only.
+                    if (tabType != 2) {
+                      return const HomepagePage(
+                        items: [],
+                        nextOffset: null,
+                        sessionId: null,
+                      );
+                    }
+                    offsets.add(offset);
+                    return HomepagePage(
+                      items: [
+                        MediaItem(
+                          id: '$offset',
+                          title: '小说 $offset',
+                          cover: '',
+                          author: '',
+                          badge: '',
+                          ep: '',
+                          kind: 'book',
+                        ),
+                      ],
+                      nextOffset: offset < 3 ? offset + 1 : null,
+                      sessionId: 'session',
+                    );
+                  },
+              searchLoader: (query, {int page = 1}) async => const [],
+            ),
+          ),
+        ],
+        child: const MaterialApp(home: HomePage()),
+      ),
+    );
+    await tester.pumpAndSettle();
+    for (var tick = 0; tick < 5; tick++) {
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pumpAndSettle();
+    }
+    expect(offsets, [0, 1, 2, 3]);
+    // The hero and featured card push the grid below the fold, so scroll the
+    // feed until the lazily-built card enters the viewport. The tab strip is
+    // a horizontal Scrollable too, so match the vertical feed by axis.
+    final feedScrollable = find.byWidgetPredicate(
+      (widget) =>
+          widget is Scrollable && widget.axisDirection == AxisDirection.down,
+    );
+    await tester.scrollUntilVisible(
+      find.text('小说 3'),
+      300,
+      scrollable: feedScrollable,
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('小说 3'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('the home tab bar follows theme changes from HomePage', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(400, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    addTearDown(() => tester.pumpWidget(const SizedBox.shrink()));
+    final mode = ValueNotifier(ThemeMode.light);
+    addTearDown(mode.dispose);
+    await tester.pumpWidget(
+      ValueListenableBuilder<ThemeMode>(
+        valueListenable: mode,
+        builder: (context, themeMode, _) => ProviderScope(
+          overrides: [
+            homeProvider.overrideWith(
+              () => HomeNotifier(
+                homepageLoader:
+                    ({
+                      int tabType = 2,
+                      int offset = 0,
+                      String? sessionId,
+                    }) async => HomepagePage(
+                      items: [
+                        MediaItem(
+                          id: '1',
+                          title: '小说 1',
+                          cover: '',
+                          author: '',
+                          badge: '',
+                          ep: '',
+                          kind: 'book',
+                        ),
+                      ],
+                      nextOffset: null,
+                      sessionId: null,
+                    ),
+                searchLoader: (query, {int page = 1}) async => const [],
+              ),
+            ),
+          ],
+          child: MaterialApp(
+            theme: ThemeData(brightness: Brightness.light),
+            darkTheme: ThemeData(brightness: Brightness.dark),
+            themeMode: themeMode,
+            home: const HomePage(),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    Color canvasOf() {
+      final box = tester
+          .widgetList<DecoratedBox>(
+            find.ancestor(
+              of: find.byKey(const ValueKey('home_category_0')),
+              matching: find.byType(DecoratedBox),
+            ),
+          )
+          .first;
+      return (box.decoration as BoxDecoration).color!;
+    }
+
+    expect(canvasOf(), const HomePalette(false).canvas);
+    mode.value = ThemeMode.dark;
+    await tester.pumpAndSettle();
+    expect(canvasOf(), const HomePalette(true).canvas);
+    expect(tester.takeException(), isNull);
+  });
+}
