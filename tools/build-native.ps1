@@ -25,7 +25,8 @@ $env:CC_SHELL_ESCAPED_FLAGS='1'
 $env:CARGO_ENCODED_RUSTFLAGS=@('-C',('link-arg=--target='+$taskClangTarget),'-C',('link-arg=--sysroot='+$taskSysroot)) -join [char]31
 $taskRustRoot=Join-Path $taskRoot 'app/rust'
 $taskSources=@(Get-ChildItem (Join-Path $taskRustRoot 'src'),(Join-Path $taskRustRoot 'assets') -Recurse -File)
-$taskSources+=Get-Item (Join-Path $taskRustRoot 'Cargo.toml'),(Join-Path $taskRustRoot 'Cargo.lock')
+$taskSources+=Get-Item (Join-Path $taskRustRoot 'Cargo.toml'),(Join-Path $taskRustRoot 'Cargo.lock'),(Join-Path $taskRustRoot 'build.rs')
+$taskSources+=Get-ChildItem (Join-Path $taskRoot 'app/native/crypto_core'),(Join-Path $taskRoot 'app/native/third_party/tiny_aes') -Recurse -File
 $taskManifest=(@($taskSources | Sort-Object FullName | ForEach-Object {
     (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()+'  '+[IO.Path]::GetRelativePath($taskRoot,$_.FullName).Replace('\','/')
 }) -join "`n")+"`n"

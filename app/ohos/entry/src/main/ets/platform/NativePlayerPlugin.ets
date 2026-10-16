@@ -1,0 +1,215 @@
+import { FlutterPlugin, FlutterPluginBinding, MethodCall, MethodCallHandler, MethodChannel, MethodResult,
+  EventChannel, StreamHandler, EventSink, TextureRegistry, SurfaceTextureEntry } from '@ohos/flutter_ohos';
+import { media } from '@kit.MediaKit';
+import { http } from '@kit.NetworkKit';
+import { common } from '@kit.AbilityKit';
+import { window } from '@kit.ArkUI';
+import { BusinessError } from '@kit.BasicServicesKit';
+import { hilog } from '@kit.PerformanceAnalysisKit';
+
+class PlayerSession {
+  id: number = 0;
+  texture: SurfaceTextureEntry;
+  player: media.AVPlayer | null = null;
+  disposed: boolean = false;
+  ready: boolean = false;
+  playWhenReady: boolean = false;
+  volume: number = 1;
+  rate: number = 1;
+  sourceId: string = '';
+  base: string = '';
+  file: number = -1;
+  queue: Promise<void> = Promise.resolve();
+  constructor(id: number, texture: SurfaceTextureEntry) { this.id = id; this.texture = texture; }
+}
+interface MediaSourceReply { id: string; url: string; }
+
+export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, StreamHandler {
+  private method: MethodChannel | null = null;
+  private eventChannel: EventChannel | null = null;
+  private events: EventSink | null = null;
+  private textures: TextureRegistry | null = null;
+  private sessions: Map<number, PlayerSession> = new Map();
+  private nextId: number = 1;
+  private context: common.UIAbilityContext;
+  constructor(context: common.UIAbilityContext) { this.context = context; }
+  getUniqueClassName(): string { return 'FqNativePlayerPlugin'; }
+  onAttachedToEngine(binding: FlutterPluginBinding): void {
+    this.textures = binding.getTextureRegistry();
+    this.method = new MethodChannel(binding.getBinaryMessenger(), 'fqapp/native_player');
+    this.method.setMethodCallHandler(this);
+    this.eventChannel = new EventChannel(binding.getBinaryMessenger(), 'fqapp/native_player/events');
+    this.eventChannel.setStreamHandler(this);
+  }
+  onDetachedFromEngine(_binding: FlutterPluginBinding): void {
+    this.method?.setMethodCallHandler(null); this.eventChannel?.setStreamHandler(null);
+    this.events = null;
+    for (const item of this.sessions.values()) { this.dispose(item); }
+    this.sessions.clear(); this.textures = null; this.method = null; this.eventChannel = null;
+  }
+  onListen(_args: Object, events: EventSink): void { this.events = events; }
+  onCancel(_args: Object): void { this.events = null; }
+
+  onMethodCall(call: MethodCall, result: MethodResult): void {
+    if (call.method === 'create') {
+      const textures = this.textures;
+      if (!textures || this.sessions.size >= 8) { result.error('PLAYER_LIMIT', '播放器资源暂不可用', null); return; }
+      const url = call.argument('cdnUrl') as string;
+      const key = call.argument('keyHex') as string;
+      const base = call.argument('loopbackBase') as string;
+      if (typeof url !== 'string' || typeof key !== 'string') { result.error('INVALID_SOURCE', '播放地址无效', null); return; }
+      const item = new PlayerSession(this.nextId++, textures.createSurfaceTexture());
+      item.base = typeof base === 'string' ? base : '';
+      this.sessions.set(item.id, item);
+      const reply = new Map<string, Object>(); reply.set('playerId', item.id); result.success(reply);
+      this.prepare(item, url, key).catch((error: Error) => this.fail(item, error));
+      return;
+    }
+    if (call.method === 'setKeepScreenOn') {
+      window.getLastWindow(this.context).then(async (win) => {
+        await win.setWindowKeepScreenOn(call.argument('on') === true); result.success(null);
+      }).catch(() => result.error('WINDOW_UNAVAILABLE', '无法设置屏幕常亮', null));
+      return;
+    }
+    if (call.method === 'startListenForeground' || call.method === 'stopListenForeground') {
+      result.error('BACKGROUND_SESSION_PENDING', '后台媒体会话尚未接入', null); return;
+    }
+    const id = call.argument('id') as number;
+    const item = this.sessions.get(id);
+    if (!item) {
+      if (call.method === 'dispose') { result.success(null); }
+      else { result.error('PLAYER_DISPOSED', '播放器已关闭', null); }
+      return;
+    }
+    if (call.method === 'dispose') { this.sessions.delete(id); this.dispose(item).then(() => result.success(null)); return; }
+    item.queue = item.queue.then(async () => {
+      if (item.disposed || !item.player || !item.ready) { result.error('PLAYER_NOT_READY', '播放器尚未准备好', null); return; }
+      try {
+        const player = item.player;
+        switch (call.method) {
+          case 'play':
+            item.playWhenReady = true; this.emit(item, 'playWhenReady', true);
+            if (player.state !== 'playing') { await player.play(); } break;
+          case 'pause':
+            item.playWhenReady = false; this.emit(item, 'playWhenReady', false);
+            if (player.state === 'playing') { await player.pause(); } break;
+          case 'seek': {
+            const position = call.argument('positionMs') as number;
+            if (!Number.isFinite(position) || position < 0) { throw new Error('INVALID_POSITION'); }
+            player.seek(Math.min(position, Math.max(player.duration, 0)), media.SeekMode.SEEK_CLOSEST);
+            this.emit(item, 'completed', false); break;
+          }
+          case 'setVolume': {
+            const volume = call.argument('volume') as number;
+            if (!Number.isFinite(volume) || volume < 0 || volume > 1) { throw new Error('INVALID_VOLUME'); }
+            item.volume = volume; player.setVolume(volume); break;
+          }
+          case 'setRate': {
+            const rate = call.argument('rate') as number;
+            if (!Number.isFinite(rate) || rate < 0.125 || rate > 4) { throw new Error('INVALID_RATE'); }
+            item.rate = rate; player.setPlaybackRate(rate); break;
+          }
+          default: result.notImplemented(); return;
+        }
+        result.success(null);
+      } catch (_) { result.error('PLAYER_OPERATION_FAILED', '系统播放器未能完成操作', null); }
+    });
+  }
+
+  private async prepare(item: PlayerSession, source: string, key: string): Promise<void> {
+    let playable = source;
+    if (key.length > 0) {
+      if (!/^[0-9a-fA-F]{32}$/.test(key) || !/^http:\/\/127\.0\.0\.1:\d+\/_session\/[0-9a-f]+$/.test(item.base)) {
+        throw new Error('INVALID_ENCRYPTED_SOURCE');
+      }
+      const request = http.createHttp();
+      try {
+        const response = await request.request(item.base + '/harmony-media/open', {
+          method: http.RequestMethod.POST, header: { 'Content-Type': 'application/json' },
+          extraData: JSON.stringify({ cdnUrl: source, keyHex: key }),
+          expectDataType: http.HttpDataType.STRING, connectTimeout: 10000, readTimeout: 25000,
+          usingCache: false
+        });
+        if (response.responseCode !== 200) { throw new Error('CENC_SOURCE_REJECTED'); }
+        const opened = JSON.parse(response.result as string) as MediaSourceReply;
+        if (typeof opened.id !== 'string' || !/^[0-9a-f]{32}$/.test(opened.id) ||
+          opened.url !== item.base + '/harmony-media/' + opened.id) { throw new Error('INVALID_MEDIA_REPLY'); }
+        item.sourceId = opened.id; playable = opened.url;
+      } finally { request.destroy(); }
+    }
+    if (item.disposed) { await this.releaseSource(item); return; }
+    const player = await media.createAVPlayer();
+    if (item.disposed) { await player.release(); await this.releaseSource(item); return; }
+    item.player = player;
+    player.on('stateChange', (state: string) => {
+      if (item.disposed) { return; }
+      if (state === 'initialized') {
+        player.surfaceId = item.texture.getSurfaceId().toString();
+        player.prepare().catch((error: Error) => this.fail(item, error));
+      } else if (state === 'prepared') {
+        item.ready = true;
+        player.setVolume(item.volume); player.setPlaybackRate(item.rate);
+        this.emit(item, 'created', item.texture.getTextureId());
+        this.emit(item, 'duration', player.duration);
+        this.emit(item, 'buffering', false);
+        this.videoSize(item, player.width, player.height);
+        hilog.info(0x0000, 'FqPlayer', 'prepared player=%{public}d duration=%{public}d', item.id, player.duration);
+        if (item.playWhenReady) { player.play().catch((error: Error) => this.fail(item, error)); }
+      } else if (state === 'playing') {
+        this.emit(item, 'playing', true); this.emit(item, 'completed', false);
+      } else if (state === 'paused' || state === 'stopped') {
+        this.emit(item, 'playing', false);
+      } else if (state === 'completed') {
+        this.emit(item, 'playing', false); this.emit(item, 'completed', true);
+      }
+    });
+    player.on('timeUpdate', (position: number) => this.emit(item, 'position', position));
+    player.on('durationUpdate', (duration: number) => this.emit(item, 'duration', duration));
+    player.on('videoSizeChange', (width: number, height: number) => this.videoSize(item, width, height));
+    player.on('startRenderFrame', () => {
+      this.emit(item, 'firstFrame', true);
+      hilog.info(0x0000, 'FqPlayer', 'firstFrame player=%{public}d', item.id);
+    });
+    player.on('error', (error: BusinessError) => this.fail(item, error));
+    this.emit(item, 'buffering', true);
+    player.url = playable;
+  }
+
+  private emit(item: PlayerSession, event: string, value: Object): void {
+    if (item.disposed) { return; }
+    const data = new Map<string, Object>(); data.set('playerId', item.id); data.set('type', event); data.set('value', value);
+    this.events?.success(data);
+  }
+  private videoSize(item: PlayerSession, width: number, height: number): void {
+    if (item.disposed || width <= 0 || height <= 0) { return; }
+    this.textures?.setTextureBufferSize(item.texture.getTextureId(), width, height);
+    const data = new Map<string, Object>(); data.set('playerId', item.id); data.set('type', 'videoSize');
+    data.set('width', width); data.set('height', height); data.set('rotationCorrection', 0);
+    this.events?.success(data);
+  }
+  private fail(item: PlayerSession, error: Error): void {
+    if (item.disposed) { return; }
+    const code = (error as BusinessError).code;
+    const detail = new Map<string, Object>(); detail.set('message', '鸿蒙播放器无法准备或解码此媒体');
+    if (typeof code === 'number') { detail.set('errorCode', code); }
+    this.emit(item, 'error', detail);
+    hilog.error(0x0000, 'FqPlayer', 'media failed player=%{public}d code=%{public}d', item.id, typeof code === 'number' ? code : -1);
+  }
+  private async dispose(item: PlayerSession): Promise<void> {
+    if (item.disposed) { return; }
+    item.disposed = true;
+    try { await item.player?.release(); } catch (_) { /* release source and texture regardless */ }
+    item.player = null;
+    item.texture.release();
+    await this.releaseSource(item);
+  }
+  private async releaseSource(item: PlayerSession): Promise<void> {
+    const id = item.sourceId; item.sourceId = '';
+    if (!id) { return; }
+    const request = http.createHttp();
+    try { await request.request(item.base + '/harmony-media/' + id, {
+      method: http.RequestMethod.DELETE, connectTimeout: 2000, readTimeout: 2000, usingCache: false
+    }); } catch (_) { /* core shutdown also cancels every source */ }
+    finally { request.destroy(); }
+  }
+}

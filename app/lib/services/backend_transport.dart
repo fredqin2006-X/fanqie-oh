@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:typed_data';
+import 'package:flutter/foundation.dart';
 
 import 'package:http/http.dart' as http;
 
@@ -123,9 +125,7 @@ class RustBackendTransport implements BackendTransport {
       // that built this transport. That is what keeps `ApiClient` injectable:
       // a Dart test that replaces `http.Client` through `http.runWithClient`
       // still drives the same request surface before the core is up.
-      _httpFallback = HttpBackendTransport(
-        baseUrl: 'http://127.0.0.1:$port',
-      );
+      _httpFallback = HttpBackendTransport(baseUrl: 'http://127.0.0.1:$port');
 
   final int port;
 
@@ -153,6 +153,7 @@ class RustBackendTransport implements BackendTransport {
   static void markRuntimeReady() {
     _runtimeReady ??= Future<void>.value();
   }
+
   final HttpBackendTransport _httpFallback;
 
   @override
@@ -187,10 +188,15 @@ class RustBackendTransport implements BackendTransport {
     // key (secure storage unavailable) keeps the old plaintext behavior;
     // a provisioning failure never blocks startup.
     final poolKey = await SecureKeyProvider().devicePoolKey();
+    final harmony = !kIsWeb && Platform.operatingSystem == 'ohos';
+    if (harmony && poolKey == null) {
+      throw StateError('设备池加密密钥不可用，已保留既有数据');
+    }
     if (poolKey != null) {
       try {
         await rust.setDevicePoolKey(key: poolKey);
       } catch (_) {
+        if (harmony) rethrow;
         // Keep starting: the pool falls back to plaintext + a warning.
       }
     }

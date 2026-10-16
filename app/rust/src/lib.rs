@@ -27,6 +27,7 @@ pub mod endpoints;
 pub mod error;
 pub mod filter;
 pub mod json;
+pub mod harmony_media;
 pub mod server;
 pub mod sign;
 pub mod static_files;

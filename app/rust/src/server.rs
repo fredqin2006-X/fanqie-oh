@@ -38,6 +38,7 @@ pub struct LoopbackHandle {
     pub port: u16,
     pub token: String,
     pub task: tokio::task::JoinHandle<()>,
+    pub media_cancel: tokio_util::sync::CancellationToken,
 }
 
 #[derive(Clone)]
@@ -46,6 +47,7 @@ struct AppState {
     /// The bound port, not the requested one: `serve(_, 0)` picks it at bind.
     port: u16,
     token: String,
+    media: Arc<crate::harmony_media::MediaManager>,
 }
 
 pub async fn serve(server: Arc<Server>, port: u16) -> Result<LoopbackHandle, String> {
@@ -60,10 +62,15 @@ pub async fn serve(server: Arc<Server>, port: u16) -> Result<LoopbackHandle, Str
         .try_fill_bytes(&mut entropy)
         .map_err(|_| "session entropy unavailable")?;
     let token = hex::encode(entropy);
+    let sandbox = std::path::Path::new(&server.ctx.src_dir).parent().and_then(|p|p.parent())
+        .ok_or("media sandbox unavailable")?.to_path_buf();
+    let media = Arc::new(crate::harmony_media::MediaManager::new(sandbox)?);
+    let media_cancel = media.cancel.clone();
     let state = AppState {
         server,
         port: local.port(),
         token: token.clone(),
+        media,
     };
     let app = Router::new().fallback(handler).with_state(state);
     let task = tokio::spawn(async move {
@@ -73,6 +80,7 @@ pub async fn serve(server: Arc<Server>, port: u16) -> Result<LoopbackHandle, Str
         port: local.port(),
         token,
         task,
+        media_cancel,
     })
 }
 
@@ -152,6 +160,13 @@ async fn handler(State(state): State<AppState>, req: axum::extract::Request) -> 
         return refuse(StatusCode::UNAUTHORIZED, "session required");
     }
     let request_path = scoped.unwrap_or(path).to_string();
+    if request_path.starts_with("/harmony-media/") {
+        if request_path == "/harmony-media/stats" && req.method() == axum::http::Method::GET {
+            return axum::Json(state.media.stats()).into_response();
+        }
+        let base = format!("http://127.0.0.1:{}/_session/{}",state.port,state.token);
+        return state.media.handle(&request_path,req,&base).await;
+    }
     let session_cookie = format!(
         "{cookie_name}={}; Path=/; HttpOnly; SameSite=Strict",
         state.token

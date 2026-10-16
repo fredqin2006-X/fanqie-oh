@@ -1,9 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
+import 'package:flutter/foundation.dart';
 
 import 'package:flutter/services.dart';
 
 import 'app_log.dart';
+import 'backend_service.dart';
 
 // Codec metadata only: never log the whole platform payload or exception text.
 final _decoderToken = RegExp(r'^[A-Za-z0-9_.+/-]{1,160}$');
@@ -270,6 +273,9 @@ class NativePlayer {
           .invokeMapMethod<String, dynamic>('create', {
             'cdnUrl': cdnUrl,
             'keyHex': keyHex,
+            if (!kIsWeb && Platform.operatingSystem == 'ohos')
+              'loopbackBase': BackendService.instance.webUiEntryUrl
+                  .replaceFirst(RegExp(r'/$'), ''),
           })
           .then((result) async {
             final rawPlayerId = result?['playerId'];

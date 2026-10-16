@@ -45,6 +45,7 @@ struct Core {
     port: u16,
     token: String,
     task: Option<tokio::task::JoinHandle<()>>,
+    media_cancel: CancellationToken,
 }
 
 static CORE: Lazy<RwLock<Option<Arc<Core>>>> = Lazy::new(|| RwLock::new(None));
@@ -179,8 +180,8 @@ pub(crate) async fn init_core(
     // configured 8080 explicitly. The loopback adapter is always part of the
     // core because resource URLs (`/src/...`) depend on it.
     let _ = cfg.port;
-    let (actual_port, token, task) = match crate::server::serve(server.clone(), port).await {
-        Ok(handle) => (handle.port, handle.token, Some(handle.task)),
+    let (actual_port, token, task, media_cancel) = match crate::server::serve(server.clone(), port).await {
+        Ok(handle) => (handle.port, handle.token, Some(handle.task), handle.media_cancel),
         Err(e) => return Err(e),
     };
 
@@ -195,6 +196,7 @@ pub(crate) async fn init_core(
         port: actual_port,
         token,
         task,
+        media_cancel,
     }));
     Ok("running".to_string())
 }
@@ -208,6 +210,7 @@ pub async fn shutdown() -> Result<(), String> {
     let _guard = INIT_LOCK.lock().await;
     GENERATION.fetch_add(1, Ordering::SeqCst);
     let core = { CORE.write().await.take() };
+    if let Some(core) = core.as_ref() { core.media_cancel.cancel(); }
     if let Some(core) = core {
         if let Some(task) = &core.task {
             task.abort();
