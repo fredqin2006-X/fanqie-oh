@@ -7,6 +7,7 @@ import { window } from '@kit.ArkUI';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { WindowPolicy } from './ReaderPlugin';
+import { BackgroundMedia } from './BackgroundMedia';
 
 class PlayerSession {
   id: number = 0;
@@ -33,6 +34,7 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
   private textures: TextureRegistry | null = null;
   private sessions: Map<number, PlayerSession> = new Map();
   private nextId: number = 1;
+  private background: BackgroundMedia | null = null;
   private context: common.UIAbilityContext;
   private windowPolicy: WindowPolicy;
   constructor(context: common.UIAbilityContext, windowPolicy: WindowPolicy) { this.context = context; this.windowPolicy = windowPolicy; }
@@ -41,12 +43,15 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
     this.textures = binding.getTextureRegistry();
     this.method = new MethodChannel(binding.getBinaryMessenger(), 'fqapp/native_player');
     this.method.setMethodCallHandler(this);
+    this.background = new BackgroundMedia(this.context, this.method);
     this.eventChannel = new EventChannel(binding.getBinaryMessenger(), 'fqapp/native_player/events');
     this.eventChannel.setStreamHandler(this);
   }
   onDetachedFromEngine(_binding: FlutterPluginBinding): void {
     this.method?.setMethodCallHandler(null); this.eventChannel?.setStreamHandler(null);
     this.events = null;
+    this.background?.stop().catch(() => {}); this.background = null;
+    this.windowPolicy.keep('media', false).catch(() => {});
     for (const item of this.sessions.values()) { this.dispose(item); }
     this.sessions.clear(); this.textures = null; this.method = null; this.eventChannel = null;
   }
@@ -75,7 +80,9 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
       return;
     }
     if (call.method === 'startListenForeground' || call.method === 'stopListenForeground') {
-      result.error('BACKGROUND_SESSION_PENDING', '后台媒体会话尚未接入', null); return;
+      const task = call.method === 'startListenForeground' ? this.background?.update(call) : this.background?.stop();
+      if (!task) { result.error('MEDIA_SESSION_DETACHED', '媒体会话已关闭', null); return; }
+      task.then(() => result.success(null)).catch(() => result.error('MEDIA_SESSION_FAILED', '系统后台媒体会话未能启动', null)); return;
     }
     const id = call.argument('id') as number;
     const item = this.sessions.get(id);
@@ -210,7 +217,8 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
     try { await item.player?.release(); } catch (_) { /* release source and texture regardless */ }
     item.player = null;
     this.textures?.unregisterTexture(item.texture.getTextureId());
-    item.texture.release();
+    // SurfaceTextureRegistryEntry.release() throws in the pinned engine;
+    // unregisterTexture owns release of its native window and surface.
     await this.releaseSource(item);
   }
   private async releaseSource(item: PlayerSession): Promise<void> {

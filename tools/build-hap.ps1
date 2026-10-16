@@ -15,6 +15,7 @@ not copy raw diagnostics, absolute machine paths, identity or device information
 param(
     [ValidateSet('ohos-arm64', 'ohos-x64')][string]$Target = 'ohos-arm64',
     [ValidateSet('debug', 'release')][string]$Mode = 'debug',
+    [ValidateSet('lib/main.dart', 'test_driver/harmony_acceptance.dart')][string]$DartTarget = 'lib/main.dart',
     [string]$FlutterRoot = $(if ($env:FQ_FLUTTER_ROOT) { $env:FQ_FLUTTER_ROOT } else { 'E:\Codex-bulid\toolchains\flutter-oh-3.44.9-canary1' }),
     [string]$DevEcoRoot = $(if ($env:FQ_DEVECO_ROOT) { $env:FQ_DEVECO_ROOT } else { 'F:\DevEco Studio' })
 )
@@ -119,7 +120,8 @@ process.stdout.write('API configuration checked');
     # The only shell interpolation is a validated executable path and enum values.
     # cmd.exe is necessary for Flutter's Windows .bat entrypoint.
     if ($taskToolchain.FlutterCommand -match '["\r\n%&|<>^!]') { throw 'Flutter path contains unsupported cmd.exe metacharacters.' }
-    $taskCommandText = '""{0}" build hap --{1} --target-platform {2} --no-codesign"' -f $taskToolchain.FlutterCommand, $Mode, $Target
+    if ($DartTarget -ne 'lib/main.dart' -and $Mode -ne 'debug') { throw 'Acceptance target is debug-only.' }
+    $taskCommandText = '""{0}" build hap --{1} --target-platform {2} --target {3} --no-codesign"' -f $taskToolchain.FlutterCommand, $Mode, $Target, $DartTarget
 
     $taskBuildId = [DateTimeOffset]::UtcNow.ToString('yyyyMMddTHHmmssfffZ') + '-' + [Guid]::NewGuid().ToString('N').Substring(0, 6)
     $taskRecordName = "$taskBuildId-$Mode-$Target"
@@ -146,7 +148,7 @@ process.stdout.write('API configuration checked');
     $taskStartedUtc = [DateTimeOffset]::UtcNow
     $taskProcess = $null
     try {
-        [IO.File]::WriteAllText((Join-Path $taskRawRoot 'attempt.txt'), "Build $taskBuildId`nStarted UTC: $($taskStartedUtc.ToString('o'))`nflutter build hap --$Mode --target-platform $Target --no-codesign`n", $taskUtf8)
+        [IO.File]::WriteAllText((Join-Path $taskRawRoot 'attempt.txt'), "Build $taskBuildId`nStarted UTC: $($taskStartedUtc.ToString('o'))`nflutter build hap --$Mode --target-platform $Target --target $DartTarget --no-codesign`n", $taskUtf8)
         Write-Host "HAP attempt $taskBuildId started. Raw logs: $taskRawRelative"
         $taskAttemptStarted = $true
         $taskProcess = Start-Process -FilePath $env:ComSpec -ArgumentList @('/d', '/s', '/c', $taskCommandText) -WorkingDirectory $taskAppRoot -WindowStyle Hidden -PassThru -Wait -RedirectStandardOutput (Join-Path $taskRawRoot 'stdout.log') -RedirectStandardError (Join-Path $taskRawRoot 'stderr.log')
@@ -183,7 +185,7 @@ process.stdout.write('API configuration checked');
 
 - Result: $taskResult
 - Start / end (UTC): $($taskStartedUtc.ToString('o')) / $($taskEndedUtc.ToString('o'))
-- Command: flutter build hap --$Mode --target-platform $Target --no-codesign
+- Command: flutter build hap --$Mode --target-platform $Target --target $DartTarget --no-codesign
 - Input HEAD: $taskHead
 - Controlled source manifest: [$taskManifestName]($taskManifestName)
 - SHA-256 of manifest (UTF-8, LF): $($taskInputs.Digest)

@@ -6,6 +6,7 @@ import { SecureKeyPlugin } from '../platform/SecureKeyPlugin';
 import { NativePlayerPlugin } from '../platform/NativePlayerPlugin';
 import { DocumentPlugin } from '../platform/DocumentPlugin';
 import { ReaderPlugin, WindowPolicy } from '../platform/ReaderPlugin';
+import { SystemTtsPlugin } from '../platform/SystemTtsPlugin';
 
 export default class EntryAbility extends FlutterAbility {
   configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -19,6 +20,7 @@ export default class EntryAbility extends FlutterAbility {
     const windowPolicy = new WindowPolicy(this.context)
     plugins.add(documents)
     plugins.add(new ReaderPlugin(this.context, documents, windowPolicy))
+    plugins.add(new SystemTtsPlugin())
     plugins.add(new NativePlayerPlugin(this.context, windowPolicy))
   }
 }
