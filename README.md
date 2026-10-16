@@ -7,6 +7,7 @@ fqapp 鸿蒙移植工作区。最低支持 **HarmonyOS 6.1.0（API 23）及以�
 - [鸿蒙移植执行手册](鸿蒙移植执行手册.md)：源码拆解、技术路线、阶段任务、构建与提交流程、验收门槛。
 - [源码基线记录](docs/source-baseline.json)：上游提交、604 个文件比对结果及关键文件 SHA-256。
 - [工具链与 G1](docs/toolchain.md)、[依赖矩阵](docs/plugin-matrix.md)、[构建记录](docs/builds/)。
+- [内部验证交付说明](docs/delivery.md)：本地 HAP、校验值、重建与真机续验步骤。
 - 上游项目：[ch6vip/fqapp](https://github.com/ch6vip/fqapp)。
 
 `fqapp-source-code-android/` 是只读参考，`Agents.md` 仅保留本地；二者均忽略。实际参与构建的 Dart、Rust/C 和插件源码均在 `app/` 受控维护。构建不依赖参考目录；界面一致性比对脚本只读该目录。
