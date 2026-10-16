@@ -9,6 +9,7 @@ import 'package:fqapp/main.dart' as original;
 import 'package:fqapp/services/native_player.dart';
 import 'package:fqapp/services/reader_device.dart';
 import 'package:fqapp/services/system_tts.dart';
+import 'package:fqapp/services/imported_book_store.dart';
 
 NativePlayer? _player;
 ReaderDevice? _reader;
@@ -50,7 +51,9 @@ Future<Map<String, Object?>> _run(Map<String, String> args) async {
     case 'readerStart':
       _reader ??= ReaderDevice();
       final status = await _reader!.start(followSystem: false, brightness: 0.4);
-      if (status == null || status.systemBrightness != 0.4) throw StateError('Reader brightness unavailable');
+      if (status == null || status.systemBrightness == null || (status.systemBrightness! - 0.4).abs() > 0.02) {
+        return {'ok': false, 'readerStatus': status != null, 'brightness': status?.systemBrightness};
+      }
       if (!await _reader!.setBrightness(followSystem: false, brightness: 0.6)) throw StateError('Reader brightness change failed');
       await _reader!.keepScreenOn(true);
       await _reader!.setImmersive(true);
@@ -68,6 +71,16 @@ Future<Map<String, Object?>> _run(Map<String, String> args) async {
         'title': 'fqapp 验证', 'episode': '系统媒体会话', 'playing': true, 'hasPrev': true, 'hasNext': true, 'positionMs': 0, 'durationMs': 15000, 'speed': 1.0,
       });
     case 'backgroundStop': await const MethodChannel('fqapp/native_player').invokeMethod<void>('stopListenForeground');
+    case 'exportFixture':
+      final result = await const MethodChannel('fqapp/downloads').invokeMapMethod<String, Object?>('saveText', {
+        'fileName': 'fq-harmony-acceptance.txt',
+        'text': '鸿蒙移植验证\n\n第一章 原版界面\n这是公开测试文本，用于验证系统文件选择、导入和阅读。\n\n第二章 离线阅读\n离线正文应在重新启动后保持可读。\n',
+      });
+      if (result?['public'] != true) throw StateError('Document export failed');
+    case 'importFixture':
+      final book = await ImportedBookStore.instance.pickAndImport();
+      if (book == null || book.chapters.length != 2) throw StateError('Document import failed');
+      return {'ok': true, 'chapters': book.chapters.length};
     case 'status': break;
     default: throw ArgumentError('Unsupported acceptance action');
   }
