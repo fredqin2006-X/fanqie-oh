@@ -39,6 +39,7 @@ Future<Map<String, Object?>> _run(Map<String, String> args) async {
       await _player?.dispose();
       final encrypted = args['encrypted'] == 'true';
       final player = _player = NativePlayer();
+      player.audioOnly = args['audio'] == 'true';
       final name = args['audio'] == 'true' ? 'audio-encrypted' : encrypted ? 'encrypted' : 'clear';
       await player.create('http://127.0.0.1:19090/$name.mp4',
           encrypted ? '00112233445566778899aabbccddeeff' : '');

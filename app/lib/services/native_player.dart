@@ -59,6 +59,8 @@ class NativePlaybackException implements Exception {
 
 /// Flutter-side wrapper of the native ExoPlayer host.
 class NativePlayer {
+  // OHOS audio playback must not allocate a Flutter video surface.
+  bool audioOnly = false;
   static const _channel = MethodChannel('fqapp/native_player');
   static const _events = EventChannel('fqapp/native_player/events');
   static const _methodTimeout = Duration(seconds: 10);
@@ -273,6 +275,8 @@ class NativePlayer {
           .invokeMapMethod<String, dynamic>('create', {
             'cdnUrl': cdnUrl,
             'keyHex': keyHex,
+            if (!kIsWeb && Platform.operatingSystem == 'ohos')
+              'audioOnly': audioOnly,
             if (!kIsWeb && Platform.operatingSystem == 'ohos')
               'loopbackBase': BackendService.instance.webUiEntryUrl
                   .replaceFirst(RegExp(r'/$'), ''),

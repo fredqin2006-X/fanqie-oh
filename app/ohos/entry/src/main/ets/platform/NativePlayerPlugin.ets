@@ -12,7 +12,7 @@ import { BackgroundMedia } from './BackgroundMedia';
 
 class PlayerSession {
   id: number = 0;
-  texture: SurfaceTextureEntry;
+  texture: SurfaceTextureEntry | null;
   player: media.AVPlayer | null = null;
   disposed: boolean = false;
   ready: boolean = false;
@@ -24,7 +24,7 @@ class PlayerSession {
   file: number = -1;
   queue: Promise<void> = Promise.resolve();
   stage: string = 'create';
-  constructor(id: number, texture: SurfaceTextureEntry) { this.id = id; this.texture = texture; }
+  constructor(id: number, texture: SurfaceTextureEntry | null) { this.id = id; this.texture = texture; }
 }
 interface MediaSourceReply { id: string; url: string; }
 
@@ -67,7 +67,7 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
       const key = call.argument('keyHex') as string;
       const base = call.argument('loopbackBase') as string;
       if (typeof url !== 'string' || typeof key !== 'string') { result.error('INVALID_SOURCE', '播放地址无效', null); return; }
-      const item = new PlayerSession(this.nextId++, textures.registerTexture(textures.getTextureId()));
+      const item = new PlayerSession(this.nextId++, call.argument('audioOnly') === true ? null : textures.registerTexture(textures.getTextureId()));
       item.base = typeof base === 'string' ? base : '';
       this.sessions.set(item.id, item);
       const reply = new Map<string, Object>(); reply.set('playerId', item.id); result.success(reply);
@@ -158,14 +158,14 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
       if (item.disposed) { return; }
       if (state === 'initialized') {
         item.stage = 'surface';
-        player.surfaceId = item.texture.getSurfaceId().toString();
+        if (item.texture) { player.surfaceId = item.texture.getSurfaceId().toString(); }
         item.stage = 'prepare';
         player.prepare().catch((error: Error) => this.fail(item, error));
       } else if (state === 'prepared') {
         item.stage = 'prepared';
         item.ready = true;
         player.setVolume(item.volume); player.setPlaybackRate(item.rate);
-        this.emit(item, 'created', item.texture.getTextureId());
+        this.emit(item, 'created', item.texture ? item.texture.getTextureId() : 0);
         this.emit(item, 'duration', player.duration);
         this.emit(item, 'buffering', false);
         this.videoSize(item, player.width, player.height);
@@ -208,7 +208,7 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
     this.events?.success(data);
   }
   private videoSize(item: PlayerSession, width: number, height: number): void {
-    if (item.disposed || width <= 0 || height <= 0) { return; }
+    if (item.disposed || !item.texture || width <= 0 || height <= 0) { return; }
     this.textures?.setTextureBufferSize(item.texture.getTextureId(), width, height);
     const data = new Map<string, Object>(); data.set('playerId', item.id); data.set('type', 'videoSize');
     data.set('width', width); data.set('height', height); data.set('rotationCorrection', 0);
@@ -228,7 +228,7 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
     const textures = this.textures;
     try { await item.player?.release(); } catch (_) { /* release source and texture regardless */ }
     item.player = null;
-    textures?.unregisterTexture(item.texture.getTextureId());
+    if (item.texture) { textures?.unregisterTexture(item.texture.getTextureId()); }
     // SurfaceTextureRegistryEntry.release() throws in the pinned engine;
     // unregisterTexture owns release of its native window and surface.
     await this.releaseSource(item);

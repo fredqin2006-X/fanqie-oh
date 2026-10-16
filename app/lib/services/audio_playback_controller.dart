@@ -462,6 +462,7 @@ class _AudioPlaybackController extends ChangeNotifier
       final player = candidate =
           request.playerFactory?.call() ?? NativePlayer();
       _player = player;
+      player.audioOnly = true;
       await player.create(source.url, source.keyHex);
       if (!_current(generation, player)) {
         await player.dispose();
