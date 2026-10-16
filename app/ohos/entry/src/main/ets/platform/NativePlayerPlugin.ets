@@ -238,7 +238,9 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
     const player = item.player; item.player = null;
     try { await player?.release(); } catch (_) { /* failed system decoder */ }
     if (item.disposed || !item.texture) { return; }
-    const id = software.create(item.texture.getSurfaceId().toString(), item.playable);
+    // Reuse the exact producer window owned by Flutter, including its buffer
+    // geometry/usage. A new handle for the same surface has separate options.
+    const id = software.create(item.texture.getNativeWindowId().toString(), item.playable);
     if (id <= 0) { throw new Error('SOFTWARE_PLAYER_CREATE_FAILED'); }
     item.softwareId = id;
     hilog.info(0x0000, 'FqPlayer', 'software fallback player=%{public}d', item.id);

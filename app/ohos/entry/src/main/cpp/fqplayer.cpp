@@ -56,7 +56,7 @@ void Close(Session &s) {
         ijkmp_android_set_surface(s.player, nullptr, false);
         ijkmp_dec_ref_p(&s.player);
     }
-    if (s.window) OH_NativeWindow_DestroyNativeWindow(s.window);
+    if (s.window) OH_NativeWindow_NativeObjectUnreference(s.window);
     s.window = nullptr;
 }
 
@@ -82,10 +82,13 @@ napi_value Create(napi_env env, napi_callback_info info) {
     auto url = String(env, argv[1]);
     if (surface.empty() || url.empty()) return Number(env, -1);
     char *end = nullptr;
-    uint64_t surfaceId = strtoull(surface.c_str(), &end, 10);
-    if (!end || *end || !surfaceId) return Number(env, -1);
+    uint64_t windowPointer = strtoull(surface.c_str(), &end, 10);
+    if (!end || *end || !windowPointer || windowPointer > 9007199254740991ULL) return Number(env, -1);
     auto s = std::make_shared<Session>();
-    if (OH_NativeWindow_CreateNativeWindowFromSurfaceId(surfaceId, &s->window) != 0) return Number(env, -1);
+    s->window = reinterpret_cast<OHNativeWindow *>(static_cast<uintptr_t>(windowPointer));
+    // Flutter owns this window; retain it until shutdown finishes before the
+    // ArkTS side unregisters the texture. Never destroy the engine's reference.
+    if (OH_NativeWindow_NativeObjectReference(s->window) != 0) return Number(env, -1);
     std::call_once(initialized, [] { ijkmp_global_init(); ijkmp_global_set_log_level(16); });
     s->player = ijkmp_android_create(MessageLoop);
     if (!s->player) { Close(*s); return Number(env, -1); }
