@@ -96,6 +96,8 @@ napi_value Create(napi_env env, napi_callback_info info) {
     ijkmp_android_set_surface(s->player, s->window, false);
     // Force FFmpeg software decoding: the fallback must not retry the failed codec.
     ijkmp_set_option_int(s->player, 4, "mediacodec", 0);
+    // Keep decoded video planar through upload; GLES performs YUV conversion.
+    ijkmp_set_option(s->player, 4, "overlay-format", "fcc-i420");
     ijkmp_set_option_int(s->player, 4, "start-on-prepared", 0);
     ijkmp_set_option_int(s->player, 4, "soundtouch", 1);
     ijkmp_set_option_int(s->player, 4, "enable-accurate-seek", 1);
