@@ -45,6 +45,13 @@
 **/device_pool.json
 /local-data/
 /local-reports/
+/local-toolchains/
+**/.cxx/
+**/.test/
+**/src/main/ets/plugins/GeneratedPluginRegistrant.ets
+**/src/main/resources/rawfile/flutter_assets/
+**/src/main/resources/base/profile/buildinfo.json5
+**/BuildProfile.ets
 
 # OS files.
 .DS_Store
