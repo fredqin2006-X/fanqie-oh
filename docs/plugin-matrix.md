@@ -1,5 +1,7 @@
 # G1 依赖兼容性矩阵
 
+> 后续实施更新：下面的“未验”表格保留初始静态审查基线。正式依赖已解算、固定 path/SHA，原应用 HAP 已构建并在模拟器运行；当前动态结果以 [实施验收记录](acceptance/2026-10-16-porting.md) 为准。具体 vendored 来源与变更见 [上游差异](upstream-changes.md)。所有 HarmonyOS 6.1 真机项仍未验，不能把旧静态表或新的模拟器结果当成完整平台通过。
+
 核查日期：2026-10-16。范围：只读参考源码 `fqapp-source-code-android/fqapp-master` 的 `pubspec.yaml`、`pubspec.lock`、Dart 通道入口，公开发布包的元数据及一方鸿蒙适配源码。此文的“已核查”仅指静态证据；本项审查没有安装插件、执行正式全量 `pub get`、编译 HAP 或验证设备功能。
 
 ## 1. 当前结论
