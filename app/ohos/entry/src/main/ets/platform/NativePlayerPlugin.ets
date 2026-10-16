@@ -6,6 +6,7 @@ import { common } from '@kit.AbilityKit';
 import { window } from '@kit.ArkUI';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { WindowPolicy } from './ReaderPlugin';
 
 class PlayerSession {
   id: number = 0;
@@ -20,6 +21,7 @@ class PlayerSession {
   base: string = '';
   file: number = -1;
   queue: Promise<void> = Promise.resolve();
+  stage: string = 'create';
   constructor(id: number, texture: SurfaceTextureEntry) { this.id = id; this.texture = texture; }
 }
 interface MediaSourceReply { id: string; url: string; }
@@ -32,7 +34,8 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
   private sessions: Map<number, PlayerSession> = new Map();
   private nextId: number = 1;
   private context: common.UIAbilityContext;
-  constructor(context: common.UIAbilityContext) { this.context = context; }
+  private windowPolicy: WindowPolicy;
+  constructor(context: common.UIAbilityContext, windowPolicy: WindowPolicy) { this.context = context; this.windowPolicy = windowPolicy; }
   getUniqueClassName(): string { return 'FqNativePlayerPlugin'; }
   onAttachedToEngine(binding: FlutterPluginBinding): void {
     this.textures = binding.getTextureRegistry();
@@ -66,8 +69,8 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
       return;
     }
     if (call.method === 'setKeepScreenOn') {
-      window.getLastWindow(this.context).then(async (win) => {
-        await win.setWindowKeepScreenOn(call.argument('on') === true); result.success(null);
+      this.windowPolicy.keep('media', call.argument('on') === true).then(() => {
+        result.success(null);
       }).catch(() => result.error('WINDOW_UNAVAILABLE', '无法设置屏幕常亮', null));
       return;
     }
@@ -117,6 +120,7 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
   }
 
   private async prepare(item: PlayerSession, source: string, key: string): Promise<void> {
+    item.stage = 'source';
     let playable = source;
     if (key.length > 0) {
       if (!/^[0-9a-fA-F]{32}$/.test(key) || !/^http:\/\/127\.0\.0\.1:\d+\/_session\/[0-9a-f]+$/.test(item.base)) {
@@ -138,15 +142,19 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
       } finally { request.destroy(); }
     }
     if (item.disposed) { await this.releaseSource(item); return; }
+    item.stage = 'player';
     const player = await media.createAVPlayer();
     if (item.disposed) { await player.release(); await this.releaseSource(item); return; }
     item.player = player;
     player.on('stateChange', (state: string) => {
       if (item.disposed) { return; }
       if (state === 'initialized') {
+        item.stage = 'surface';
         player.surfaceId = item.texture.getSurfaceId().toString();
+        item.stage = 'prepare';
         player.prepare().catch((error: Error) => this.fail(item, error));
       } else if (state === 'prepared') {
+        item.stage = 'prepared';
         item.ready = true;
         player.setVolume(item.volume); player.setPlaybackRate(item.rate);
         this.emit(item, 'created', item.texture.getTextureId());
@@ -172,6 +180,7 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
     });
     player.on('error', (error: BusinessError) => this.fail(item, error));
     this.emit(item, 'buffering', true);
+    item.stage = 'url';
     player.url = playable;
   }
 
@@ -193,7 +202,7 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
     const detail = new Map<string, Object>(); detail.set('message', '鸿蒙播放器无法准备或解码此媒体');
     if (typeof code === 'number') { detail.set('errorCode', code); }
     this.emit(item, 'error', detail);
-    hilog.error(0x0000, 'FqPlayer', 'media failed player=%{public}d code=%{public}d', item.id, typeof code === 'number' ? code : -1);
+    hilog.error(0x0000, 'FqPlayer', 'media failed player=%{public}d stage=%{public}s code=%{public}d', item.id, item.stage, typeof code === 'number' ? code : -1);
   }
   private async dispose(item: PlayerSession): Promise<void> {
     if (item.disposed) { return; }
