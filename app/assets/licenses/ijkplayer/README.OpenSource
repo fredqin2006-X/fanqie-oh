@@ -1,0 +1,65 @@
+[
+    {
+        "Name": "ijkplayer",
+        "License": "LGPLv2.1 or later",
+        "License File": "README.md",
+        "Version Number": "k0.8.8",
+        "Owner": "panjinling@huawei.com",
+        "Upstream URL": "https://github.com/bilibili/ijkplayer",
+        "Description": "Android/iOS video player based on FFmpeg n3.4, with MediaCodec, VideoToolbox support."
+    },
+	{
+        "Name": "FFmpeg",
+        "License": "LGPLv2.1 or later",
+        "License File": "LICENSE.md",
+        "Version Number": "ff4.0--ijk0.8.8--20210426--001",
+        "Owner": "panjinling@huawei.com",
+        "Upstream URL": "https://github.com/bilibili/FFmpeg",
+        "Description": "FFmpeg is a collection of libraries and tools to process multimedia content such as audio, video, subtitles and related metadata."
+    },
+    {
+        "Name": "openssl",
+        "License": "Apache License 2.0",
+        "License File": "notes.txt",
+        "Version Number": "3.4.0",
+        "Owner": "panjinling@huawei.com",
+        "Upstream URL": "https://github.com/openssl/openssl",
+        "Description": "OpenSSL is a robust, commercial-grade, full-featured Open Source Toolkit for the Transport Layer Security (TLS) protocol formerly known as the Secure Sockets Layer (SSL) protocol."
+    },
+    {
+        "Name": "soundtouch",
+        "License": "LGPL-2.1",
+        "License File": "LICENSE, COPYING.TXT",
+        "Version Number": "ijk-r0.1.2-dev",
+        "Owner": "panjinling@huawei.com",
+        "Upstream URL": "https://github.com/bilibili/soundtouch",
+        "Description": "SoundTouch is an open-source audio processing library that allows changing the sound tempo, pitch and playback rate parameters independently from each other"
+    },
+    {
+        "Name": "libyuv",
+        "License": "BSD 3-Clause New or Revised License",
+        "License File": "LICENSE",
+        "Version Number": "ijk-r0.2.1-dev",
+        "Owner": "panjinling@huawei.com",
+        "Upstream URL": "https://github.com/bilibili/libyuv",
+        "Description": "libyuv is an open source project that includes YUV conversion and scaling functionality."
+    },
+    {
+        "Name": "ijkplayer",
+        "License": "LGPLv2.1 or later",
+        "License File": "README.md",
+        "Version Number": "master",
+        "Owner": "panjinling@huawei.com",
+        "Upstream URL": "https://gitee.com/HarmonyOS-tpc/ijkplayer",
+        "Description": "基于FFmpeg的ohos视频播放器"
+    },
+    {
+        "Name": "hashmap",
+        "License": "MIT License",
+        "License File": "LICENSE",
+        "Version Number": "master",
+        "Owner": "panjinling@huawei.com",
+        "Upstream URL": "https://github.com/qilutong/hashmap",
+        "Description": "C语言实现简单hashmap"
+    }
+]

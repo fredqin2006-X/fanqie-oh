@@ -9,6 +9,7 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { WindowPolicy } from './ReaderPlugin';
 import { BackgroundMedia } from './BackgroundMedia';
+import * as software from 'libfqplayer.so';
 
 class PlayerSession {
   id: number = 0;
@@ -25,6 +26,12 @@ class PlayerSession {
   file: number = -1;
   queue: Promise<void> = Promise.resolve();
   stage: string = 'create';
+  playable: string = '';
+  softwareId: number = 0;
+  fallbackStarted: boolean = false;
+  pollTimer: number = -1;
+  errorTimer: number = -1;
+  duration: number = 0;
   constructor(id: number, texture: SurfaceTextureEntry | null) { this.id = id; this.texture = texture; }
 }
 interface MediaSourceReply { id: string; url: string; }
@@ -95,9 +102,11 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
     }
     if (call.method === 'dispose') { this.sessions.delete(id); this.dispose(item).then(() => result.success(null)); return; }
     item.queue = item.queue.then(async () => {
-      if (item.disposed || item.failed || !item.player || !item.ready) { result.error('PLAYER_NOT_READY', '播放器尚未准备好', null); return; }
+      if (item.disposed || item.failed || (!item.player && !item.softwareId) || !item.ready) { result.error('PLAYER_NOT_READY', '播放器尚未准备好', null); return; }
       try {
+        if (item.softwareId) { this.softwareCommand(item, call); result.success(null); return; }
         const player = item.player;
+        if (!player) { throw new Error('PLAYER_NOT_READY'); }
         switch (call.method) {
           case 'play':
             item.playWhenReady = true; this.emit(item, 'playWhenReady', true);
@@ -151,17 +160,18 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
       } finally { request.destroy(); }
     }
     if (item.disposed) { await this.releaseSource(item); return; }
+    item.playable = playable;
     item.stage = 'player';
     const player = await media.createAVPlayer();
     if (item.disposed) { await player.release(); await this.releaseSource(item); return; }
     item.player = player;
     player.on('stateChange', (state: string) => {
-      if (item.disposed || item.failed) { return; }
+      if (item.disposed || item.failed || item.fallbackStarted) { return; }
       if (state === 'initialized') {
         item.stage = 'surface';
         if (item.texture) { player.surfaceId = item.texture.getSurfaceId().toString(); }
         item.stage = 'prepare';
-        player.prepare().catch((error: Error) => this.fail(item, error));
+        player.prepare().catch((error: Error) => this.playerFailure(item, error, true));
       } else if (state === 'prepared') {
         item.stage = 'prepared';
         item.ready = true;
@@ -180,19 +190,22 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
         this.emit(item, 'playing', false); this.emit(item, 'completed', true);
       }
     });
-    player.on('timeUpdate', (position: number) => this.emit(item, 'position', position));
-    player.on('durationUpdate', (duration: number) => this.emit(item, 'duration', duration));
-    player.on('videoSizeChange', (width: number, height: number) => this.videoSize(item, width, height));
+    player.on('timeUpdate', (position: number) => { if (!item.fallbackStarted) { this.emit(item, 'position', position); } });
+    player.on('durationUpdate', (duration: number) => { if (!item.fallbackStarted) { this.emit(item, 'duration', duration); } });
+    player.on('videoSizeChange', (width: number, height: number) => { if (!item.fallbackStarted) { this.videoSize(item, width, height); } });
     player.on('startRenderFrame', () => {
+      if (item.fallbackStarted) { return; }
       this.emit(item, 'firstFrame', true);
       hilog.info(0x0000, 'FqPlayer', 'firstFrame player=%{public}d', item.id);
     });
-    player.on('error', (error: BusinessError) => this.fail(item, error));
+    player.on('error', (error: BusinessError) => this.playerFailure(item, error, false));
     player.on('bufferingUpdate', (type: media.BufferingInfoType, _value: number) => {
+      if (item.fallbackStarted) { return; }
       if (type === media.BufferingInfoType.BUFFERING_START) { this.emit(item, 'buffering', true); }
       else if (type === media.BufferingInfoType.BUFFERING_END) { this.emit(item, 'buffering', false); }
     });
     player.on('audioInterrupt', (event: audio.InterruptEvent) => {
+      if (item.fallbackStarted) { return; }
       if (event.hintType === audio.InterruptHint.INTERRUPT_HINT_PAUSE || event.hintType === audio.InterruptHint.INTERRUPT_HINT_STOP) {
         item.playWhenReady = false; this.emit(item, 'playWhenReady', false);
         if (player.state === 'playing') { player.pause().catch(() => {}); }
@@ -201,6 +214,98 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
     this.emit(item, 'buffering', true);
     item.stage = 'url';
     player.url = playable;
+  }
+
+  private playerFailure(item: PlayerSession, error: Error, promise: boolean): void {
+    if (item.disposed || item.failed || item.fallbackStarted) { return; }
+    // Prefer the native error event over the secondary rejected prepare promise.
+    if (promise) {
+      if (item.errorTimer < 0) {
+        item.errorTimer = setTimeout(() => { item.errorTimer = -1; this.playerFailure(item, error, false); }, 100);
+      }
+      return;
+    }
+    if (item.errorTimer >= 0) { clearTimeout(item.errorTimer); item.errorTimer = -1; }
+    const code = (error as BusinessError).code;
+    if (item.texture && item.stage === 'prepare' && (code === 5400106 || code === 5400102)) {
+      item.fallbackStarted = true;
+      this.prepareSoftware(item).catch((failure: Error) => this.fail(item, failure));
+    } else { this.fail(item, error); }
+  }
+
+  private async prepareSoftware(item: PlayerSession): Promise<void> {
+    item.stage = 'software';
+    const player = item.player; item.player = null;
+    try { await player?.release(); } catch (_) { /* failed system decoder */ }
+    if (item.disposed || !item.texture) { return; }
+    const id = software.create(item.texture.getSurfaceId().toString(), item.playable);
+    if (id <= 0) { throw new Error('SOFTWARE_PLAYER_CREATE_FAILED'); }
+    item.softwareId = id;
+    hilog.info(0x0000, 'FqPlayer', 'software fallback player=%{public}d', item.id);
+    item.pollTimer = setInterval(() => this.pollSoftware(item), 200);
+  }
+
+  private pollSoftware(item: PlayerSession): void {
+    if (item.disposed || item.failed || !item.softwareId) { return; }
+    const state = software.poll(item.softwareId);
+    item.duration = state.duration;
+    for (const event of state.events) {
+      if (item.failed) { break; }
+      switch (event.what) {
+        case 100: this.fail(item, new Error('SOFTWARE_DECODE_FAILED')); break;
+        case 200:
+          item.ready = true;
+          this.emit(item, 'created', item.texture ? item.texture.getTextureId() : 0);
+          this.emit(item, 'duration', state.duration);
+          this.emit(item, 'buffering', false);
+          software.command(item.softwareId, 'volume', item.volume);
+          software.command(item.softwareId, 'rate', item.rate);
+          if (item.playWhenReady) { software.command(item.softwareId, 'play', 0); }
+          hilog.info(0x0000, 'FqPlayer', 'software prepared player=%{public}d duration=%{public}d', item.id, state.duration);
+          break;
+        case 300: this.emit(item, 'completed', true); break;
+        case 400: this.videoSize(item, event.a, event.b); break;
+        case 402:
+          this.emit(item, 'firstFrame', true);
+          hilog.info(0x0000, 'FqPlayer', 'software firstFrame player=%{public}d', item.id); break;
+        case 412:
+          if (event.b === 2 || event.b === 3) {
+            item.playWhenReady = false; this.emit(item, 'playWhenReady', false);
+            software.command(item.softwareId, 'pause', 0);
+          }
+          break;
+        case 500: this.emit(item, 'buffering', true); break;
+        case 501: this.emit(item, 'buffering', false); break;
+      }
+    }
+    if (item.ready) {
+      this.emit(item, 'position', state.position);
+      this.emit(item, 'playing', state.playing);
+    }
+  }
+
+  private softwareCommand(item: PlayerSession, call: MethodCall): void {
+    let name = call.method;
+    let value = 0;
+    switch (name) {
+      case 'play': item.playWhenReady = true; this.emit(item, 'playWhenReady', true); this.emit(item, 'completed', false); break;
+      case 'pause': item.playWhenReady = false; this.emit(item, 'playWhenReady', false); break;
+      case 'seek':
+        value = call.argument('positionMs') as number;
+        if (!Number.isFinite(value) || value < 0) { throw new Error('INVALID_POSITION'); }
+        value = Math.min(value, Math.max(item.duration, 0));
+        this.emit(item, 'completed', false); break;
+      case 'setVolume':
+        value = call.argument('volume') as number;
+        if (!Number.isFinite(value) || value < 0 || value > 1) { throw new Error('INVALID_VOLUME'); }
+        item.volume = value; name = 'volume'; break;
+      case 'setRate':
+        value = call.argument('rate') as number;
+        if (!Number.isFinite(value) || value < 0.125 || value > 4) { throw new Error('INVALID_RATE'); }
+        item.rate = value; name = 'rate'; break;
+      default: throw new Error('UNKNOWN_PLAYER_OPERATION');
+    }
+    if (software.command(item.softwareId, name, value) < 0) { throw new Error('SOFTWARE_PLAYER_OPERATION_FAILED'); }
   }
 
   private emit(item: PlayerSession, event: string, value: Object): void {
@@ -231,9 +336,12 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
   private async dispose(item: PlayerSession): Promise<void> {
     if (item.disposed) { return; }
     item.disposed = true;
+    if (item.errorTimer >= 0) { clearTimeout(item.errorTimer); item.errorTimer = -1; }
+    if (item.pollTimer >= 0) { clearInterval(item.pollTimer); item.pollTimer = -1; }
     const textures = this.textures;
     try { await item.player?.release(); } catch (_) { /* release source and texture regardless */ }
     item.player = null;
+    if (item.softwareId) { await software.release(item.softwareId); item.softwareId = 0; }
     if (item.texture) { textures?.unregisterTexture(item.texture.getTextureId()); }
     // SurfaceTextureRegistryEntry.release() throws in the pinned engine;
     // unregisterTexture owns release of its native window and surface.

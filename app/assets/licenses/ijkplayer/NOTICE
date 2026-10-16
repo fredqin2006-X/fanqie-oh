@@ -1,0 +1,71 @@
+OPEN SOURCE SOFTWARE NOTICE
+
+Please note we provide an open source software notice for the third party open source software along with this software and/or this software component (in the following just “this SOFTWARE”). The open source software licenses are granted by the respective right holders.
+
+Warranty Disclaimer
+THE OPEN SOURCE SOFTWARE IN THIS PRODUCT IS DISTRIBUTED IN THE HOPE THAT IT WILL BE USEFUL, BUT WITHOUT ANY WARRANTY, WITHOUT EVEN THE IMPLIED WARRANTY OF MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE. SEE THE APPLICABLE LICENSES FOR MORE DETAILS.
+
+Copyright Notice and License Texts
+
+----------------------------------------------------------------------
+
+Software: ijkplayer
+
+Copyright notice:
+
+Copyright (c) 2003 Bilibili
+
+Copyright (c) 2003 Fabrice Bellard
+
+Copyright (c) 2013 Zhang Rui <bbcallen@gmail.com>
+
+License: ijkplayer is licensed under LGPLv2.1 or later, so itself is free for commercial use under LGPLv2.1 or later
+
+
+Software: FFmpeg
+
+Copyright notice:
+
+Copyright (c) 2003 Michel Bardiaux
+
+Copyright (C) 2001-2011 Michael Niedermayer <michaelni@gmx.at>
+
+Copyright (c) 2000, 2001, 2003 Fabrice Bellard
+
+Copyright (c) 2007 Bobby Bingham
+
+Copyright (c) 2011 Stefano Sabatini
+
+Copyright (c) 2008 Vitor Sessak
+
+
+License:  Most files in FFmpeg are under the GNU Lesser General Public License version 2.1 or later (LGPL v2.1+). Read the file COPYING.LGPLv2.1 for details. Some other files have MIT/X11/BSD-style licenses. In combination the LGPL v2.1+ applies to FFmpeg.
+
+Some optional parts of FFmpeg are licensed under the GNU General Public License version 2 or later (GPL v2+). See the file COPYING.GPLv2 for details. None of these parts are used by default, you have to explicitly pass --enable-gpl to configure to activate them. In this case, FFmpeg's license changes to GPL v2+.
+
+
+Software: soundtouch
+
+Copyright notice: 
+
+Copyright (c) Olli Parviainen
+
+License: This library is free software; you can redistribute it and/or modify it under the terms of the GNU Lesser General Public License version 2.1 as published by the Free Software Foundation.
+
+
+Software: libyuv
+
+Copyright notice: 
+
+Copyright 2011 The LibYuv Project Authors. All rights reserved.
+
+License: libyuv is an open source project that includes YUV conversion and scaling functionality.
+
+
+Software: hashmap
+
+Copyright notice: 
+
+Copyright 齐鲁桐. All rights reserved.
+
+License: MIT License

@@ -24,6 +24,7 @@ import 'services/drama_download_store.dart';
 import 'services/drama_downloader.dart';
 import 'services/connectivity_status.dart';
 import 'services/home_feed_cache.dart';
+import 'services/harmony_player_licenses.dart';
 import 'services/library_store.dart';
 import 'services/rank_cache.dart';
 import 'services/player_style_config.dart';
@@ -37,6 +38,7 @@ import 'widgets/home/home_design.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  registerHarmonyPlayerLicenses();
   // 应用内日志：接管 debugPrint 与 FlutterError.onError，未处理异步异常由
   // runZonedGuarded 捕获；文件持久化异步开启，失败只退回内存模式。
   AppLog.instance.install();
