@@ -77,6 +77,7 @@ void main() {
     (code: 2004, status: 403, title: '视频暂时无法播放'),
     (code: 2004, status: 500, title: '播放服务暂时不可用'),
     (code: 4003, status: null, title: '视频解析失败'),
+    (code: 5400106, status: null, title: '视频解析失败'),
   ]) {
     testWidgets(
       'native ${scenario.code}/${scenario.status} is explained without leaking its message',

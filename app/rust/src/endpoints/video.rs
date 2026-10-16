@@ -134,6 +134,8 @@ fn handle_video<'a>(ctx: &'a Ctx, params: &'a Params) -> BoxFuture<'a, ApiResult
 }
 
 /// Queries the phoenix multi_video_model endpoint.
+// HarmonyOS uses AVPlayer, so advertise the system-player path to upstream.
+// This is a request hint, not a guarantee that an AVC rendition is available.
 async fn fetch_phoenix_video_model(ctx: &Ctx, video_id: &str) -> ApiResult<Vec<u8>> {
     let post_body = serde_json::to_vec(&json!({
         "biz_param": {
@@ -142,7 +144,7 @@ async fn fetch_phoenix_video_model(ctx: &Ctx, video_id: &str) -> ApiResult<Vec<u
             "disable_digg_stat": false,
             "need_all_video_definition": true,
             "need_mp4_align": false,
-            "use_os_player": false,
+            "use_os_player": cfg!(target_env = "ohos"),
             "use_server_dns": false,
             "video_platform": 1024,
         },
@@ -177,7 +179,7 @@ async fn fetch_shortplay_video_model(ctx: &Ctx, video_id: &str) -> ApiResult<Vec
             "need_all_video_definition": true,
             "need_mp4_align": false,
             "source": 4,
-            "use_os_player": false,
+            "use_os_player": cfg!(target_env = "ohos"),
             "use_server_dns": false,
             "video_platform": 3,
         },

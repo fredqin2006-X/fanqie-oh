@@ -31,12 +31,13 @@ enum PlaybackIssue {
       if (status != null && status >= 400 && status <= 599) {
         return _fromHttpStatus(status);
       }
-      // Media3 PlaybackException codes, retained by the native event bridge.
+      // Media3 and HarmonyOS AVPlayer codes retained by the native bridge.
       return switch (error.errorCode ?? 0) {
         2001 => network, // IO_NETWORK_CONNECTION_FAILED
         2002 => timeout, // IO_NETWORK_CONNECTION_TIMEOUT
         2004 || 2005 => unavailable, // HTTP status / missing file
         2003 || >= 3001 && <= 3004 || >= 4001 && <= 4005 => decoding,
+        5400106 => decoding, // AVPlayer: unsupported format
         _ => unknown,
       };
     }

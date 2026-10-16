@@ -15,6 +15,7 @@ class PlayerSession {
   texture: SurfaceTextureEntry | null;
   player: media.AVPlayer | null = null;
   disposed: boolean = false;
+  failed: boolean = false;
   ready: boolean = false;
   playWhenReady: boolean = false;
   volume: number = 1;
@@ -94,7 +95,7 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
     }
     if (call.method === 'dispose') { this.sessions.delete(id); this.dispose(item).then(() => result.success(null)); return; }
     item.queue = item.queue.then(async () => {
-      if (item.disposed || !item.player || !item.ready) { result.error('PLAYER_NOT_READY', '播放器尚未准备好', null); return; }
+      if (item.disposed || item.failed || !item.player || !item.ready) { result.error('PLAYER_NOT_READY', '播放器尚未准备好', null); return; }
       try {
         const player = item.player;
         switch (call.method) {
@@ -155,7 +156,7 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
     if (item.disposed) { await player.release(); await this.releaseSource(item); return; }
     item.player = player;
     player.on('stateChange', (state: string) => {
-      if (item.disposed) { return; }
+      if (item.disposed || item.failed) { return; }
       if (state === 'initialized') {
         item.stage = 'surface';
         if (item.texture) { player.surfaceId = item.texture.getSurfaceId().toString(); }
@@ -203,19 +204,24 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
   }
 
   private emit(item: PlayerSession, event: string, value: Object): void {
-    if (item.disposed) { return; }
+    if (item.disposed || (item.failed && event !== 'error')) { return; }
     const data = new Map<string, Object>(); data.set('playerId', item.id); data.set('type', event); data.set('value', value);
     this.events?.success(data);
   }
   private videoSize(item: PlayerSession, width: number, height: number): void {
-    if (item.disposed || !item.texture || width <= 0 || height <= 0) { return; }
+    if (item.disposed || item.failed || !item.texture || width <= 0 || height <= 0) { return; }
     this.textures?.setTextureBufferSize(item.texture.getTextureId(), width, height);
     const data = new Map<string, Object>(); data.set('playerId', item.id); data.set('type', 'videoSize');
     data.set('width', width); data.set('height', height); data.set('rotationCorrection', 0);
     this.events?.success(data);
   }
   private fail(item: PlayerSession, error: Error): void {
-    if (item.disposed) { return; }
+    // AVPlayer can report the same failure through its event and a rejected
+    // prepare/play promise. Preserve the first cause and retire late callbacks.
+    if (item.disposed || item.failed) { return; }
+    item.failed = true;
+    item.ready = false;
+    item.playWhenReady = false;
     const code = (error as BusinessError).code;
     const detail = new Map<string, Object>(); detail.set('message', code === 5400106 ? '当前设备不支持此媒体编码' : '鸿蒙播放器无法准备或解码此媒体');
     if (typeof code === 'number') { detail.set('errorCode', code); }
