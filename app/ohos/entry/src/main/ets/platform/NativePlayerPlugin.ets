@@ -61,7 +61,7 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
       const key = call.argument('keyHex') as string;
       const base = call.argument('loopbackBase') as string;
       if (typeof url !== 'string' || typeof key !== 'string') { result.error('INVALID_SOURCE', '播放地址无效', null); return; }
-      const item = new PlayerSession(this.nextId++, textures.createSurfaceTexture());
+      const item = new PlayerSession(this.nextId++, textures.registerTexture(textures.getTextureId()));
       item.base = typeof base === 'string' ? base : '';
       this.sessions.set(item.id, item);
       const reply = new Map<string, Object>(); reply.set('playerId', item.id); result.success(reply);
@@ -209,6 +209,7 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
     item.disposed = true;
     try { await item.player?.release(); } catch (_) { /* release source and texture regardless */ }
     item.player = null;
+    this.textures?.unregisterTexture(item.texture.getTextureId());
     item.texture.release();
     await this.releaseSource(item);
   }
