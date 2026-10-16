@@ -6,6 +6,7 @@
 *.json5 text eol=lf
 *.ps1 text eol=crlf
 *.sh text eol=lf
+*.sha256 text eol=lf
 *.png binary
 *.webp binary
 *.woff2 binary

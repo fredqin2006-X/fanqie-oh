@@ -51,6 +51,7 @@
 **/src/main/ets/plugins/GeneratedPluginRegistrant.ets
 **/src/main/resources/rawfile/flutter_assets/
 **/src/main/resources/base/profile/buildinfo.json5
+**/src/main/resources/rawfile/buildinfo.json5
 **/BuildProfile.ets
 
 # OS files.

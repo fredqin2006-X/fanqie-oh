@@ -2,7 +2,8 @@ import { FlutterPlugin, FlutterPluginBinding, MethodCall, MethodCallHandler, Met
 import { common } from '@kit.AbilityKit';
 import { preferences } from '@kit.ArkData';
 import { fileIo } from '@kit.CoreFileKit';
-import { deviceInfo, hilog } from '@kit.BasicServicesKit';
+import { deviceInfo } from '@kit.BasicServicesKit';
+import { hilog } from '@kit.PerformanceAnalysisKit';
 import { HuksProbeStore } from './HuksProbeStore';
 
 export class BootstrapPlugin implements FlutterPlugin, MethodCallHandler {
@@ -56,7 +57,7 @@ export class BootstrapPlugin implements FlutterPlugin, MethodCallHandler {
         const code = (error as Error).message;
         const allowedCodes = ['SECURE_RECORD_INVALID', 'SECURE_KEY_MISSING', 'SECURE_PERSIST_FAILED',
           'SECURE_VERIFY_FAILED', 'SECURE_EMPTY_RESULT', 'PREFERENCES_INVALID', 'PREFERENCES_PERSIST_FAILED',
-          'PRIVATE_FILE_INVALID'];
+          'PRIVATE_FILE_INVALID', 'SECURE_OPERATION_FAILED'];
         const safeCode = allowedCodes.includes(code) ? code : 'PLATFORM_STORAGE_FAILED';
         hilog.error(0x0000, 'FqBootstrap', 'G1 storage failed: %{public}s', safeCode);
         result.error(safeCode, 'Local storage verification failed; existing data preserved', null);

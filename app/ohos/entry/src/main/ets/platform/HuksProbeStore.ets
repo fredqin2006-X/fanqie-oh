@@ -2,6 +2,7 @@ import { huks } from '@kit.UniversalKeystoreKit';
 import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import { preferences } from '@kit.ArkData';
 import { util } from '@kit.ArkTS';
+import { BusinessError } from '@kit.BasicServicesKit';
 
 interface SealedProbe {
   version: number;
@@ -19,7 +20,15 @@ export class HuksProbeStore {
 
   async verify(store: preferences.Preferences): Promise<boolean> {
     const encoded = await store.get(this.entry, '');
-    const exists = await huks.isKeyItemExist(this.alias, { properties: [] });
+    let exists: boolean = false;
+    try {
+      exists = await huks.isKeyItemExist(this.alias, { properties: [] });
+    } catch (error) {
+      // HUKS rejects (rather than returning false) for a missing alias.
+      if ((error as BusinessError).code !== 12000011) {
+        throw new Error('SECURE_OPERATION_FAILED');
+      }
+    }
     if (typeof encoded !== 'string') {
       throw new Error('SECURE_RECORD_INVALID');
     }
@@ -101,7 +110,7 @@ export class HuksProbeStore {
       return result.outData;
     } catch (error) {
       try { await huks.abortSession(session.handle, { properties: [] }); } catch (_) { /* already closed */ }
-      throw error;
+      throw new Error('SECURE_OPERATION_FAILED');
     }
   }
 

@@ -7,6 +7,8 @@ export default class EntryAbility extends FlutterAbility {
   configureFlutterEngine(flutterEngine: FlutterEngine) {
     super.configureFlutterEngine(flutterEngine)
     GeneratedPluginRegistrant.registerWith(flutterEngine)
-    flutterEngine.getPlugins().add(new BootstrapPlugin())
+    const plugins = flutterEngine.getPlugins()
+    if (!plugins) { throw new Error('Flutter plugin registry unavailable') }
+    plugins.add(new BootstrapPlugin())
   }
 }
