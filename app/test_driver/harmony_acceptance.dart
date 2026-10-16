@@ -38,7 +38,8 @@ Future<Map<String, Object?>> _run(Map<String, String> args) async {
       await _player?.dispose();
       final encrypted = args['encrypted'] == 'true';
       final player = _player = NativePlayer();
-      await player.create('http://127.0.0.1:19090/${encrypted ? 'encrypted' : 'clear'}.mp4',
+      final name = args['audio'] == 'true' ? 'audio-encrypted' : encrypted ? 'encrypted' : 'clear';
+      await player.create('http://127.0.0.1:19090/$name.mp4',
           encrypted ? '00112233445566778899aabbccddeeff' : '');
       await player.play();
     case 'playerPause': await _player!.pause();
@@ -48,7 +49,9 @@ Future<Map<String, Object?>> _run(Map<String, String> args) async {
     case 'playerDispose': await _player?.dispose(); _player = null;
     case 'readerStart':
       _reader ??= ReaderDevice();
-      await _reader!.start(followSystem: false, brightness: 0.4);
+      final status = await _reader!.start(followSystem: false, brightness: 0.4);
+      if (status == null || status.systemBrightness != 0.4) throw StateError('Reader brightness unavailable');
+      if (!await _reader!.setBrightness(followSystem: false, brightness: 0.6)) throw StateError('Reader brightness change failed');
       await _reader!.keepScreenOn(true);
       await _reader!.setImmersive(true);
     case 'readerStop': await _reader?.close(); _reader = null;
@@ -61,8 +64,10 @@ Future<Map<String, Object?>> _run(Map<String, String> args) async {
       await SystemTts.speak('鸿蒙应用中文朗读验证。保持原来的阅读界面。', 'harmonyAcceptance');
     case 'ttsStop': await SystemTts.shutdown();
     case 'backgroundStart':
-      await NativePlayer.startListenForeground(title: 'fqapp 验证', episode: '系统媒体会话', playing: true, hasPrev: true, hasNext: true, positionMs: 0, durationMs: 15000);
-    case 'backgroundStop': await NativePlayer.stopListenForeground();
+      await const MethodChannel('fqapp/native_player').invokeMethod<void>('startListenForeground', {
+        'title': 'fqapp 验证', 'episode': '系统媒体会话', 'playing': true, 'hasPrev': true, 'hasNext': true, 'positionMs': 0, 'durationMs': 15000, 'speed': 1.0,
+      });
+    case 'backgroundStop': await const MethodChannel('fqapp/native_player').invokeMethod<void>('stopListenForeground');
     case 'status': break;
     default: throw ArgumentError('Unsupported acceptance action');
   }

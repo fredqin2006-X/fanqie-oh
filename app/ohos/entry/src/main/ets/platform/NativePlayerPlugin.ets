@@ -1,6 +1,7 @@
 import { FlutterPlugin, FlutterPluginBinding, MethodCall, MethodCallHandler, MethodChannel, MethodResult,
   EventChannel, StreamHandler, EventSink, TextureRegistry, SurfaceTextureEntry } from '@ohos/flutter_ohos';
 import { media } from '@kit.MediaKit';
+import { audio } from '@kit.AudioKit';
 import { http } from '@kit.NetworkKit';
 import { common } from '@kit.AbilityKit';
 import { window } from '@kit.ArkUI';
@@ -186,6 +187,16 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
       hilog.info(0x0000, 'FqPlayer', 'firstFrame player=%{public}d', item.id);
     });
     player.on('error', (error: BusinessError) => this.fail(item, error));
+    player.on('bufferingUpdate', (type: media.BufferingInfoType, _value: number) => {
+      if (type === media.BufferingInfoType.BUFFERING_START) { this.emit(item, 'buffering', true); }
+      else if (type === media.BufferingInfoType.BUFFERING_END) { this.emit(item, 'buffering', false); }
+    });
+    player.on('audioInterrupt', (event: audio.InterruptEvent) => {
+      if (event.hintType === audio.InterruptHint.INTERRUPT_HINT_PAUSE || event.hintType === audio.InterruptHint.INTERRUPT_HINT_STOP) {
+        item.playWhenReady = false; this.emit(item, 'playWhenReady', false);
+        if (player.state === 'playing') { player.pause().catch(() => {}); }
+      }
+    });
     this.emit(item, 'buffering', true);
     item.stage = 'url';
     player.url = playable;
@@ -206,7 +217,7 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
   private fail(item: PlayerSession, error: Error): void {
     if (item.disposed) { return; }
     const code = (error as BusinessError).code;
-    const detail = new Map<string, Object>(); detail.set('message', '鸿蒙播放器无法准备或解码此媒体');
+    const detail = new Map<string, Object>(); detail.set('message', code === 5400106 ? '当前设备不支持此媒体编码' : '鸿蒙播放器无法准备或解码此媒体');
     if (typeof code === 'number') { detail.set('errorCode', code); }
     this.emit(item, 'error', detail);
     hilog.error(0x0000, 'FqPlayer', 'media failed player=%{public}d stage=%{public}s code=%{public}d', item.id, item.stage, typeof code === 'number' ? code : -1);
@@ -214,9 +225,10 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
   private async dispose(item: PlayerSession): Promise<void> {
     if (item.disposed) { return; }
     item.disposed = true;
+    const textures = this.textures;
     try { await item.player?.release(); } catch (_) { /* release source and texture regardless */ }
     item.player = null;
-    this.textures?.unregisterTexture(item.texture.getTextureId());
+    textures?.unregisterTexture(item.texture.getTextureId());
     // SurfaceTextureRegistryEntry.release() throws in the pinned engine;
     // unregisterTexture owns release of its native window and surface.
     await this.releaseSource(item);

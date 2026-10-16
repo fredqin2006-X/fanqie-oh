@@ -29,9 +29,9 @@ export class SystemTtsPlugin implements FlutterPlugin, MethodCallHandler, Stream
         switch (call.method) {
           case 'engines': {
             // Only advertise an engine after the system confirms Chinese voice availability.
-            const voices = await textToSpeech.listVoices({ requestId: 'fqVoices' + (++this.serial), online: 1, extraParams: { language: 'zh-CN' } });
+            const voices = await textToSpeech.listVoices({ requestId: 'fqVoices' + (++this.serial), online: 1 });
             const engines: Map<string, Object>[] = [];
-            if (voices.length > 0) { const item = new Map<string, Object>(); item.set('package', 'harmony.system.zhCN'); item.set('label', '鸿蒙系统中文朗读'); engines.push(item); }
+            if (voices.some(item => /^zh[-_]CN$/.test(item.language))) { const item = new Map<string, Object>(); item.set('package', 'harmony.system.zhCN'); item.set('label', '鸿蒙系统中文朗读'); engines.push(item); }
             const reply = new Map<string, Object>(); reply.set('engines', engines);
             if (engines.length > 0) { reply.set('defaultEngine', 'harmony.system.zhCN'); } result.success(reply); break;
           }
