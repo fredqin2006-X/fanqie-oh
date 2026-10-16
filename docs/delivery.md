@@ -22,7 +22,7 @@ eea6f035af31038d94da00aa159bd2aad20635edccc0ec1e3c3d9df314dc0b19
 
 包内只有 `arm64-v8a` 的 `libapp.so`、`libflutter.so`、`libfqapi_core.so`。`module.json`：版本 `1.0.120+125`，debug=false，min/target `60100023`（HarmonyOS 6.1/API 23），compile `26.0.0.105`。核心来自同一份 Rust/C 源码摘要 `3382496edd43919dc6ab130ba65675639ca5005f74e8f88104908513830a962a`；SDK `llvm-strip --strip-all` 后与包内核心字节一致，包内核心 SHA-256 为 `1b2e292e1785453a964741a0a6aaa29cefde6875944533c3697e5fff6aa889fb`。
 
-x86_64 debug 验证包对应 `20261016T160456401Z-eaea82`，SHA-256 `1c5268a821e93968eafe95e0377d70e0328eeba09dd43417a58c2984122face1`。它包含音频无 Surface 修复和测试入口；最终 ARM64 包还包括旧听书页的一行 audioOnly 标记。
+x86_64 debug 验证包已更新到 `20261016T201315702Z-8f1432`，189,977,262 字节，SHA-256 `7bd59de5edc92c0b66f54c9545813033a66f0a11ce847032c33f270879aed464`，包含 TTS 播报完成回调修复。原页面的 TXT/备份与两章朗读续验见[2026-10-17 记录](acceptance/2026-10-17-followup.md)。上列 ARM64 包为此前构建，尚不包含这次 TTS 修复，后续需重建。
 
 ## 从源码构建
 

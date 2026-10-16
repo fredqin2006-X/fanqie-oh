@@ -46,7 +46,11 @@ export class SystemTtsPlugin implements FlutterPlugin, MethodCallHandler, Stream
             this.rate = rate; this.engine = engine;
             engine.setListener({
               onStart: (id: string, _response: textToSpeech.StartResponse) => this.emit(id, 'start'),
-              onComplete: (id: string, _response: textToSpeech.CompleteResponse) => this.emit(id, 'done'),
+              onComplete: (id: string, response: textToSpeech.CompleteResponse) => {
+                // type=0 only finishes synthesis. Advancing Dart's queue here
+                // stops audio that is still playing and truncates each chunk.
+                if (response.type === 1) { this.emit(id, 'done'); }
+              },
               onStop: (id: string, _response: textToSpeech.StopResponse) => this.emit(id, 'interrupted'),
               onError: (id: string, _code: number, _message: string) => this.emit(id, 'error'),
               onData: (_id: string, _audio: ArrayBuffer, _response: textToSpeech.SynthesisResponse) => {}
