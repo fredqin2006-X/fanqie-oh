@@ -1,0 +1,51 @@
+# Local Android source reference (not part of the HarmonyOS repository).
+/fqapp-source-code-android/
+
+# Local agent instructions, in any capitalization.
+/[Aa][Gg][Ee][Nn][Tt][Ss].[Mm][Dd]
+
+# Build tools, dependencies, and generated artifacts.
+**/.hvigor/
+**/oh_modules/
+**/node_modules/
+**/.dart_tool/
+**/.ohpm/
+**/.pub-cache/
+**/.flutter-plugins-dependencies
+**/build/
+**/target/
+**/.idea/
+**/.vscode/
+**/local.properties
+**/local.properties.*
+*.hap
+*.hsp
+*.app
+*.apk
+*.aab
+*.so
+*.dll
+*.dylib
+*.log
+
+# Local signing credentials and runtime data.
+/signing/
+**/.env
+**/.env.*
+!**/.env.example
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.cer
+*.p7b
+*.pem
+*.key
+**/keystore.properties
+**/device_pool.json
+/local-data/
+/local-reports/
+
+# OS files.
+.DS_Store
+Thumbs.db

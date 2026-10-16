@@ -1,0 +1,11 @@
+* text=auto
+.gitattributes text eol=lf
+.gitignore text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.json5 text eol=lf
+*.ps1 text eol=crlf
+*.sh text eol=lf
+*.png binary
+*.webp binary
+*.woff2 binary

@@ -1,0 +1,31 @@
+{
+  "analyzedOn": "2026-10-16",
+  "repository": "https://github.com/ch6vip/fqapp",
+  "branch": "master",
+  "upstreamCommit": "5938f25dab2015f502ded1f2079ec2a51b8b4bc6",
+  "upstreamCommitTimeUtc": "2026-10-16T07:24:26Z",
+  "upstreamSubject": "chore: bump version to 1.0.120+125 for review fixes merge",
+  "localReferenceDirectory": "fqapp-source-code-android/fqapp-master",
+  "upstreamFileCount": 604,
+  "localFileCount": 604,
+  "missingFiles": [],
+  "extraFiles": [],
+  "exactGitBlobMatches": 602,
+  "lineEndingOnlyDifferences": [
+    "scripts/build_rust_backend.ps1",
+    "scripts/run_rust_host_tests.ps1"
+  ],
+  "comparison": "Compared local unfiltered Git blob hashes with the GitHub recursive tree; the two remaining UTF-8 PowerShell files match after CRLF-to-LF normalization.",
+  "applicationVersion": "1.0.120+125",
+  "minimumHarmonyOS": "6.1.0(23)",
+  "keyFileSha256": {
+    "pubspec.yaml": "39dc809e847f19c56b402a9e4957cd6779652e888eb3081e3f9c7cd325af4742",
+    "pubspec.lock": "753e743a3ecc9cf714e23d171c2d5b82622a7cb11d11ac1ba086b009fbed6142",
+    "rust/Cargo.toml": "e0129eeaae8f960206eda7d325982dc3fe13f318055b174f57bd6e1b48cdf261",
+    "rust/Cargo.lock": "f011cdd9da6152b552e033514ac8c553039957b9a753daacdbad24f14305b648",
+    "lib/services/backend_transport.dart": "487cb13196d4418117f08e74bef530123eed66564623c462c426bd5099e9c27c",
+    "lib/services/native_player.dart": "1eecdb5adf5009fcb3d222bfbd2a8e3cd2c7f216efc137e9bc85065b08ce3ead",
+    "native/crypto_core/sp_stream.c": "ce12efb3f72371f8a3bebb2342dd11801292e65b8dc0509f3d9ebd1eddef5fea"
+  },
+  "validationScope": "Read-only source analysis and file comparison; no application build, test suite, device installation, or runtime acceptance performed."
+}
