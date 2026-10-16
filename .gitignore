@@ -52,6 +52,8 @@
 **/src/main/resources/rawfile/flutter_assets/
 **/src/main/resources/base/profile/buildinfo.json5
 **/src/main/resources/rawfile/buildinfo.json5
+# Engine composition settings are controlled inputs for the video surface.
+!app/ohos/entry/src/main/resources/rawfile/buildinfo.json5
 **/BuildProfile.ets
 
 # OS files.

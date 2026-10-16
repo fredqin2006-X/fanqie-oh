@@ -37,6 +37,7 @@ import '../widgets/player/playlet_more_panel.dart';
 import '../widgets/player/playlet_more_panel_light.dart';
 import '../widgets/player/playlet_quick_catalog_sheet.dart';
 import '../widgets/player/player_video_layout.dart';
+import '../widgets/player/native_video_surface.dart';
 import 'detail_page.dart';
 import 'drama_download_sheet.dart';
 import 'home_provider.dart';
@@ -3326,7 +3327,7 @@ class _InlineVideoLayer extends StatelessWidget {
                     rect: layout.video,
                     child: RotatedBox(
                       quarterTurns: playback.rotation.value,
-                      child: Texture(
+                      child: NativeVideoSurface(
                         key: ValueKey(
                           'drama_inline_texture_${item.kind}_${item.id}',
                         ),

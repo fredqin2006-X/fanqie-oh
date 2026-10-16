@@ -189,6 +189,20 @@ class NativePlayer {
 
   int? _playerId;
   int? _textureId;
+  bool _nativeSurface = false;
+
+  /// Native surface composition is selected only by the HarmonyOS host.
+  static int? nativeSurfacePlayer(int textureId) {
+    for (final player in _instances.values) {
+      if (player._textureId == textureId &&
+          player._nativeSurface &&
+          !player._disposed) {
+        return player._playerId;
+      }
+    }
+    return null;
+  }
+
   bool _disposed = false;
   bool _creationFailed = false;
   Future<int>? _createFuture;
@@ -492,6 +506,8 @@ class NativePlayer {
     if (_disposed || event is! Map) return;
     final type = event['type'] as String?;
     switch (type) {
+      case 'nativeSurface':
+        _nativeSurface = event['value'] == true;
       case 'created':
         final value = event['value'];
         if (value is num) {

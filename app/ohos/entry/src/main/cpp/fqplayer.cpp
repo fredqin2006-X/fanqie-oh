@@ -13,6 +13,7 @@ struct Event { int what, a, b; };
 struct Session {
     IjkMediaPlayer *player = nullptr;
     OHNativeWindow *window = nullptr;
+    uint64_t surfaceId = 0;
     std::mutex mutex;
     std::condition_variable exited;
     bool loopDone = false;
@@ -56,7 +57,7 @@ void Close(Session &s) {
         ijkmp_android_set_surface(s.player, nullptr, false);
         ijkmp_dec_ref_p(&s.player);
     }
-    if (s.window) OH_NativeWindow_NativeObjectUnreference(s.window);
+    if (s.window) OH_NativeWindow_DestroyNativeWindow(s.window);
     s.window = nullptr;
 }
 
@@ -75,20 +76,12 @@ std::string String(napi_env env, napi_value value) {
 int Id(napi_env env, napi_value value) { int32_t id = 0; napi_get_value_int32(env, value, &id); return id; }
 
 napi_value Create(napi_env env, napi_callback_info info) {
-    size_t argc = 2; napi_value argv[2]{};
+    size_t argc = 1; napi_value argv[1]{};
     napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
-    if (argc != 2 || sessions.size() >= 8) return Number(env, -1);
-    auto surface = String(env, argv[0]);
-    auto url = String(env, argv[1]);
-    if (surface.empty() || url.empty()) return Number(env, -1);
-    char *end = nullptr;
-    uint64_t windowPointer = strtoull(surface.c_str(), &end, 10);
-    if (!end || *end || !windowPointer || windowPointer > 9007199254740991ULL) return Number(env, -1);
+    if (argc != 1 || sessions.size() >= 8) return Number(env, -1);
+    auto url = String(env, argv[0]);
+    if (url.empty()) return Number(env, -1);
     auto s = std::make_shared<Session>();
-    s->window = reinterpret_cast<OHNativeWindow *>(static_cast<uintptr_t>(windowPointer));
-    // Flutter owns this window; retain it until shutdown finishes before the
-    // ArkTS side unregisters the texture. Never destroy the engine's reference.
-    if (OH_NativeWindow_NativeObjectReference(s->window) != 0) return Number(env, -1);
     std::call_once(initialized, [] { ijkmp_global_init(); ijkmp_global_set_log_level(16); });
     s->player = ijkmp_android_create(MessageLoop);
     if (!s->player) { Close(*s); return Number(env, -1); }
@@ -114,6 +107,30 @@ napi_value Create(napi_env env, napi_callback_info info) {
         s->events.push_back({100, -1, 0});
     }
     return Number(env, id);
+}
+
+// XComponent surfaces are composed by ArkUI. This avoids an extra EGL image
+// import into Flutter. The window remains owned here until IJK detaches it.
+napi_value SetSurface(napi_env env, napi_callback_info info) {
+    size_t argc = 2; napi_value argv[2]{};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    if (argc != 2) return Number(env, -1);
+    auto found = sessions.find(Id(env, argv[0]));
+    if (found == sessions.end()) return Number(env, -1);
+    auto surface = String(env, argv[1]);
+    if (surface.empty() || surface.find_first_not_of("0123456789") != std::string::npos) return Number(env, -1);
+    char *end = nullptr;
+    uint64_t surfaceId = strtoull(surface.c_str(), &end, 10);
+    if (surface.empty() || !end || *end) return Number(env, -1);
+    auto &s = *found->second;
+    if (s.surfaceId == surfaceId) return Number(env, 0);
+    OHNativeWindow *window = nullptr;
+    if (surfaceId && OH_NativeWindow_CreateNativeWindowFromSurfaceId(surfaceId, &window) != 0) return Number(env, -1);
+    ijkmp_android_set_surface(s.player, window, false);
+    if (s.window) OH_NativeWindow_DestroyNativeWindow(s.window);
+    s.window = window;
+    s.surfaceId = surfaceId;
+    return Number(env, 0);
 }
 
 napi_value Poll(napi_env env, napi_callback_info info) {
@@ -183,6 +200,7 @@ napi_value Init(napi_env env, napi_value exports) {
     napi_property_descriptor methods[] = {
         {"create", nullptr, Create, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"poll", nullptr, Poll, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setSurface", nullptr, SetSurface, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"command", nullptr, Command, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"release", nullptr, Release, nullptr, nullptr, nullptr, napi_default, nullptr}
     };

@@ -34,6 +34,7 @@ import '../widgets/player/playlet_danmaku_settings.dart';
 import '../widgets/player/story_player_panel.dart';
 import '../widgets/player/player_cover.dart';
 import '../widgets/player/player_feedback.dart';
+import '../widgets/player/native_video_surface.dart';
 import '../widgets/video_player_chrome.dart';
 
 class PlayerPage extends StatefulWidget {
@@ -1524,7 +1525,7 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
         if (texture != null)
           RotatedBox(
             quarterTurns: _player!.videoRotationCorrection ~/ 90,
-            child: Texture(
+            child: NativeVideoSurface(
               key: const ValueKey('player-texture'),
               textureId: texture,
             ),

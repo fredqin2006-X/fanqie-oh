@@ -151,7 +151,10 @@ process.stdout.write('API configuration checked');
         [IO.File]::WriteAllText((Join-Path $taskRawRoot 'attempt.txt'), "Build $taskBuildId`nStarted UTC: $($taskStartedUtc.ToString('o'))`nflutter build hap --$Mode --target-platform $Target --target $DartTarget --no-codesign`n", $taskUtf8)
         Write-Host "HAP attempt $taskBuildId started. Raw logs: $taskRawRelative"
         $taskAttemptStarted = $true
-        $taskProcess = Start-Process -FilePath $env:ComSpec -ArgumentList @('/d', '/s', '/c', $taskCommandText) -WorkingDirectory $taskAppRoot -WindowStyle Hidden -PassThru -Wait -RedirectStandardOutput (Join-Path $taskRawRoot 'stdout.log') -RedirectStandardError (Join-Path $taskRawRoot 'stderr.log')
+        $taskProcess = Start-Process -FilePath $env:ComSpec -ArgumentList @('/d', '/s', '/c', $taskCommandText) -WorkingDirectory $taskAppRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $taskRawRoot 'stdout.log') -RedirectStandardError (Join-Path $taskRawRoot 'stderr.log')
+        # cmd /c waits for flutter.bat itself. Waiting on the whole Windows job
+        # can hang after a compiler failure when crash reporting leaves helpers.
+        $taskProcess.WaitForExit()
         $taskBuildExit = $taskProcess.ExitCode
     }
     catch {

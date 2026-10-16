@@ -5,7 +5,8 @@ export interface PlayerState {
   duration: number;
   playing: boolean;
 }
-export const create: (nativeWindowPointer: string, url: string) => number;
+export const create: (url: string) => number;
 export const poll: (id: number) => PlayerState;
+export const setSurface: (id: number, surfaceId: string) => number;
 export const command: (id: number, name: string, value: number) => number;
 export const release: (id: number) => Promise<void>;

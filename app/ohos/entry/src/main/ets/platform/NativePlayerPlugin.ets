@@ -10,6 +10,7 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { WindowPolicy } from './ReaderPlugin';
 import { BackgroundMedia } from './BackgroundMedia';
 import * as software from 'libfqplayer.so';
+import { SoftwareVideoViewFactory } from './SoftwareVideoView';
 
 class PlayerSession {
   id: number = 0;
@@ -32,6 +33,7 @@ class PlayerSession {
   pollTimer: number = -1;
   errorTimer: number = -1;
   duration: number = 0;
+  surfaceView: number = -1;
   constructor(id: number, texture: SurfaceTextureEntry | null) { this.id = id; this.texture = texture; }
 }
 interface MediaSourceReply { id: string; url: string; }
@@ -49,6 +51,16 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
   constructor(context: common.UIAbilityContext, windowPolicy: WindowPolicy) { this.context = context; this.windowPolicy = windowPolicy; }
   getUniqueClassName(): string { return 'FqNativePlayerPlugin'; }
   onAttachedToEngine(binding: FlutterPluginBinding): void {
+    binding.getPlatformViewRegistry().registerViewFactory('fqapp/software_video',
+      new SoftwareVideoViewFactory((playerId: number, viewId: number, surface: string) => {
+        const item = this.sessions.get(playerId);
+        if (!item || item.disposed || !item.softwareId) { return; }
+        if (surface === '0' && item.surfaceView !== viewId) { return; }
+        if (software.setSurface(item.softwareId, surface) < 0) {
+          this.fail(item, new Error('SOFTWARE_SURFACE_FAILED')); return;
+        }
+        item.surfaceView = surface === '0' ? -1 : viewId;
+      }));
     this.textures = binding.getTextureRegistry();
     this.method = new MethodChannel(binding.getBinaryMessenger(), 'fqapp/native_player');
     this.method.setMethodCallHandler(this);
@@ -238,11 +250,12 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
     const player = item.player; item.player = null;
     try { await player?.release(); } catch (_) { /* failed system decoder */ }
     if (item.disposed || !item.texture) { return; }
-    // Reuse the exact producer window owned by Flutter, including its buffer
-    // geometry/usage. A new handle for the same surface has separate options.
-    const id = software.create(item.texture.getNativeWindowId().toString(), item.playable);
+    // Prepare without a surface. Once prepared, Flutter mounts the native
+    // XComponent and its surface is attached without delaying player creation.
+    const id = software.create(item.playable);
     if (id <= 0) { throw new Error('SOFTWARE_PLAYER_CREATE_FAILED'); }
     item.softwareId = id;
+    this.emit(item, 'nativeSurface', true);
     hilog.info(0x0000, 'FqPlayer', 'software fallback player=%{public}d', item.id);
     item.pollTimer = setInterval(() => this.pollSoftware(item), 200);
   }
