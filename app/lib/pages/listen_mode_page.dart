@@ -151,6 +151,7 @@ class _ListenModePageState extends State<ListenModePage>
       final keyHex = variant?.keyHex ?? source.keyHex;
       await _player?.dispose();
       final player = (widget.playerFactory ?? NativePlayer.new)();
+      player.audioOnly = true;
       await player.create(url, keyHex);
       await player.setRate(_rate);
       if (autoplay) unawaited(player.play());

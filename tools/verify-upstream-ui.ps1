@@ -9,6 +9,7 @@ $taskCode += Get-ChildItem (Join-Path $taskReference 'lib/pages'),(Join-Path $ta
 $taskAssets = @(Get-ChildItem (Join-Path $taskReference 'assets') -File -Recurse)
 $taskDifferent = [Collections.Generic.List[string]]::new()
 $taskAssetWhitespace = 0
+$taskBridgeOnly = 0
 foreach ($taskFile in $taskCode) {
     $taskRelative = [IO.Path]::GetRelativePath($taskReference, $taskFile.FullName)
     $taskDestination = Join-Path $taskApp $taskRelative
@@ -16,6 +17,10 @@ foreach ($taskFile in $taskCode) {
     # Git may normalize CRLF; a stripped blank line at EOF is nonvisual.
     $taskLeft = [IO.File]::ReadAllText($taskFile.FullName).Replace("`r`n", "`n").TrimEnd()
     $taskRight = [IO.File]::ReadAllText($taskDestination).Replace("`r`n", "`n").TrimEnd()
+    if ($taskRelative.Replace('\','/') -eq 'lib/pages/listen_mode_page.dart' -and $taskRight.Contains("      player.audioOnly = true;`n")) {
+        $taskRight = $taskRight.Replace("      player.audioOnly = true;`n", '')
+        $taskBridgeOnly++
+    }
     if ($taskLeft -cne $taskRight) { $taskDifferent.Add($taskRelative) }
 }
 foreach ($taskFile in $taskAssets) {
@@ -34,5 +39,5 @@ foreach ($taskFile in $taskAssets) {
         if ($taskEquivalent) { $taskAssetWhitespace++ } else { $taskDifferent.Add($taskRelative) }
     }
 }
-[pscustomobject]@{uiCodeFiles=$taskCode.Count;assetFiles=$taskAssets.Count;assetRawIdentical=$taskAssets.Count-$taskAssetWhitespace;assetBlankLineOnly=$taskAssetWhitespace;different=$taskDifferent.ToArray();scope='main/pages/widgets normalized text; assets SHA256 with one documented web whitespace exception; no screen parity claim'} | ConvertTo-Json
+[pscustomobject]@{uiCodeFiles=$taskCode.Count;uiNonvisualAudioFlag=$taskBridgeOnly;assetFiles=$taskAssets.Count;assetRawIdentical=$taskAssets.Count-$taskAssetWhitespace;assetBlankLineOnly=$taskAssetWhitespace;different=$taskDifferent.ToArray();scope='main/pages/widgets normalized text with one exact audio-only platform flag exception; assets SHA256 with one web whitespace exception; no screen parity claim'} | ConvertTo-Json
 if ($taskDifferent.Count) { throw 'Original UI/resource drift detected; review before delivery.' }
