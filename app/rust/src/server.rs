@@ -165,7 +165,10 @@ async fn handler(State(state): State<AppState>, req: axum::extract::Request) -> 
             return axum::Json(state.media.stats()).into_response();
         }
         let base = format!("http://127.0.0.1:{}/_session/{}",state.port,state.token);
-        return state.media.handle(&request_path,req,&base).await;
+        let mut response = state.media.handle(&request_path,req,&base).await;
+        response.headers_mut().insert(header::CACHE_CONTROL,HeaderValue::from_static("no-store"));
+        response.headers_mut().insert(header::REFERRER_POLICY,HeaderValue::from_static("no-referrer"));
+        return response;
     }
     let session_cookie = format!(
         "{cookie_name}={}; Path=/; HttpOnly; SameSite=Strict",
