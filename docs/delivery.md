@@ -4,6 +4,8 @@
 
 ## 最新强制横屏与默认分辨率包
 
+**横屏状态更新：** 下列包经用户反馈仍不能横屏，不作为横屏修复通过依据。后续已完成模拟器方向队列和旋转边距修复，见 [原生运行复测](acceptance/2026-10-17-emulator-rotation.md)；按用户要求，本轮先供查看模拟器，不交付新 ARM64 安装包。
+
 - 文件：`local-reports/delivery/fqapp-1.0.120-20261017-force-landscape-resolution-arm64-release-unsigned.hap`
 - ARM64 Release，正常 `lib/main.dart`，版本 `1.0.120+125`，debug=false，最低 HarmonyOS 6.1 / API 23；包内 min/target 为 `60100023`，ARM64 应用、引擎与播放器 ELF 架构已核对。
 - 构建记录：`20261017T021719705Z-cf8b7f`；104,943,905 字节。

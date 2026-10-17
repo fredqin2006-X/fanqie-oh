@@ -51,14 +51,24 @@ export class DisplayPlugin implements FlutterPlugin, MethodCallHandler, StreamHa
     const reply = new Map<string, Object>();
     const win = this.win;
     if (!win) { return reply; }
-    const area = win.getWindowAvoidArea(window.AvoidAreaType.TYPE_CUTOUT);
     const bounds = win.getWindowProperties().windowRect;
-    const top = area.topRect; const bottom = area.bottomRect;
-    const left = area.leftRect; const right = area.rightRect;
-    reply.set('top', top.width > 0 && top.height > 0 ? Math.max(0, top.top + top.height) : 0);
-    reply.set('bottom', bottom.width > 0 && bottom.height > 0 ? Math.max(0, bounds.height - bottom.top) : 0);
-    reply.set('left', left.width > 0 && left.height > 0 ? Math.max(0, left.left + left.width) : 0);
-    reply.set('right', right.width > 0 && right.height > 0 ? Math.max(0, bounds.width - right.left) : 0);
+    // Native avoid areas are authoritative after rotation. Flutter's cached
+    // portrait viewPadding/displayFeature can otherwise leave an extra top gap.
+    const areas = [win.getWindowAvoidArea(window.AvoidAreaType.TYPE_CUTOUT),
+      win.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM),
+      win.getWindowAvoidArea(window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR)];
+    let topInset = 0; let bottomInset = 0; let leftInset = 0; let rightInset = 0;
+    for (const area of areas) {
+      const top = area.topRect; const bottom = area.bottomRect;
+      const left = area.leftRect; const right = area.rightRect;
+      if (top.width > 0 && top.height > 0) { topInset = Math.max(topInset, top.top + top.height); }
+      if (bottom.width > 0 && bottom.height > 0) { bottomInset = Math.max(bottomInset, bounds.height - bottom.top); }
+      if (left.width > 0 && left.height > 0) { leftInset = Math.max(leftInset, left.left + left.width); }
+      if (right.width > 0 && right.height > 0) { rightInset = Math.max(rightInset, bounds.width - right.left); }
+    }
+    reply.set('top', topInset); reply.set('bottom', bottomInset);
+    reply.set('left', leftInset); reply.set('right', rightInset);
+    reply.set('width', bounds.width); reply.set('height', bounds.height);
     return reply;
   }
   private publish(): void { if (this.win && this.sink) { this.sink.success(this.metrics()); } }

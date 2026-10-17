@@ -172,7 +172,9 @@ class _DisplaySafeAreaState extends State<DisplaySafeArea>
   static const _method = MethodChannel('fqapp/display');
   static const _events = EventChannel('fqapp/display/events');
   StreamSubscription<dynamic>? _subscription;
-  EdgeInsets _cutoutPixels = EdgeInsets.zero;
+  EdgeInsets _nativeInsetsPixels = EdgeInsets.zero;
+  Size _nativeWindowPixels = Size.zero;
+  bool _hasNativeInsets = false;
   bool get _enabled => widget.enabled ?? Platform.operatingSystem == 'ohos';
 
   @override
@@ -189,6 +191,9 @@ class _DisplaySafeAreaState extends State<DisplaySafeArea>
 
   void _receive(dynamic value) {
     if (!mounted || value is! Map) return;
+    for (final key in ['left', 'top', 'right', 'bottom']) {
+      if (value[key] is! num || !(value[key] as num).isFinite) return;
+    }
     double edge(String key) {
       final raw = value[key];
       return raw is num && raw.isFinite ? math.max(0, raw.toDouble()) : 0;
@@ -200,7 +205,16 @@ class _DisplaySafeAreaState extends State<DisplaySafeArea>
       edge('right'),
       edge('bottom'),
     );
-    if (insets != _cutoutPixels) setState(() => _cutoutPixels = insets);
+    final window = Size(edge('width'), edge('height'));
+    if (!_hasNativeInsets ||
+        insets != _nativeInsetsPixels ||
+        window != _nativeWindowPixels) {
+      setState(() {
+        _nativeInsetsPixels = insets;
+        _nativeWindowPixels = window;
+        _hasNativeInsets = true;
+      });
+    }
   }
 
   Future<void> _refresh() async {
@@ -233,14 +247,17 @@ class _DisplaySafeAreaState extends State<DisplaySafeArea>
   @override
   Widget build(BuildContext context) {
     if (!_enabled) return widget.child;
-    final data = readerMediaQueryWithCutoutInsets(MediaQuery.of(context));
-    final cutout = _cutoutPixels / data.devicePixelRatio;
-    final safe = EdgeInsets.fromLTRB(
-      math.max(data.viewPadding.left, cutout.left),
-      math.max(data.viewPadding.top, cutout.top),
-      math.max(data.viewPadding.right, cutout.right),
-      math.max(data.viewPadding.bottom, cutout.bottom),
-    );
+    final raw = MediaQuery.of(context);
+    final physical = raw.size * raw.devicePixelRatio;
+    final nativeMatches =
+        _hasNativeInsets &&
+        (_nativeWindowPixels.isEmpty ||
+            ((physical.width - _nativeWindowPixels.width).abs() < 1 &&
+                (physical.height - _nativeWindowPixels.height).abs() < 1));
+    final data = nativeMatches ? raw : readerMediaQueryWithCutoutInsets(raw);
+    final safe = nativeMatches
+        ? _nativeInsetsPixels / data.devicePixelRatio
+        : data.viewPadding;
     EdgeInsets remaining(EdgeInsets edges) => EdgeInsets.fromLTRB(
       math.max(0, edges.left - safe.left),
       math.max(0, edges.top - safe.top),
@@ -269,8 +286,12 @@ class _DisplaySafeAreaState extends State<DisplaySafeArea>
                       math.max(0, data.size.width - safe.horizontal),
                       math.max(0, data.size.height - safe.vertical),
                     ),
-                    padding: remaining(data.padding),
-                    viewPadding: remaining(data.viewPadding),
+                    padding: nativeMatches
+                        ? EdgeInsets.zero
+                        : remaining(data.padding),
+                    viewPadding: nativeMatches
+                        ? EdgeInsets.zero
+                        : remaining(data.viewPadding),
                     viewInsets: remaining(data.viewInsets),
                     displayFeatures: data.displayFeatures
                         .where(
