@@ -56,7 +56,10 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
         const item = this.sessions.get(playerId);
         if (!item || item.disposed || !item.softwareId) { return; }
         if (surface === '0' && item.surfaceView !== viewId) { return; }
-        if (software.setSurface(item.softwareId, surface) < 0) {
+        const attached = software.setSurface(item.softwareId, surface);
+        hilog.info(0x0000, 'FqPlayer', 'software surface player=%{public}d view=%{public}d attached=%{public}d result=%{public}d',
+          item.id, viewId, surface === '0' ? 0 : 1, attached);
+        if (attached < 0) {
           this.fail(item, new Error('SOFTWARE_SURFACE_FAILED')); return;
         }
         item.surfaceView = surface === '0' ? -1 : viewId;
