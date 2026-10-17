@@ -16,6 +16,7 @@ import '../services/player_preferences.dart';
 import '../services/player_style_config.dart';
 import '../services/short_series_font_scale.dart';
 import '../platform/display_safe_area.dart';
+import '../platform/player_window_orientation.dart';
 import '../models/playlet_comment.dart';
 import 'player/playlet_danmaku_layer.dart';
 import 'player/playlet_danmaku_settings.dart';
@@ -295,6 +296,8 @@ class _VideoPlayerChromeState extends State<VideoPlayerChrome>
   int _rateGeneration = 0;
   Future<void> _systemUiUpdates = Future<void>.value();
   bool _systemUiTouched = false;
+  bool _forceLandscape = false;
+  final _windowOrientation = const PlayerWindowOrientation();
 
   /// 横滑调进度的起手位置与激活状态。null = 没有进行中的横滑；
   /// `_dragSeekActive` = 已证明是横向主导的拖动（见 [_updateDragSeek]）。
@@ -1442,7 +1445,7 @@ class _VideoPlayerChromeState extends State<VideoPlayerChrome>
     }
   }
 
-  Future<void> _toggleFullScreen() async {
+  Future<void> _toggleFullScreen({bool forceLandscape = false}) async {
     _endBoost();
     _cancelSeek();
     _doubleTapGuard?.cancel();
@@ -1453,6 +1456,7 @@ class _VideoPlayerChromeState extends State<VideoPlayerChrome>
     setState(() {
       _fullScreen = !_fullScreen;
       _visible = !_fullScreen;
+      _forceLandscape = _fullScreen && forceLandscape;
     });
     await _applySystemUi();
     if (mounted) {
@@ -1467,7 +1471,6 @@ class _VideoPlayerChromeState extends State<VideoPlayerChrome>
     final operation = _systemUiUpdates.then((_) async {
       if (!mounted || _fullScreen != fullScreen) return;
       if (fullScreen) {
-        await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
         final orientations = _orientationsForVideo;
         // A freshly created player reports no video size, so the orientation is
         // unknown rather than portrait. Deciding "0 > 0 is false, therefore
@@ -1475,17 +1478,28 @@ class _VideoPlayerChromeState extends State<VideoPlayerChrome>
         // time the next episode auto-played. With no answer, leave the device in
         // the orientation the viewer already chose; [_adoptVideoOrientation]
         // applies the real one once the size arrives.
-        _appliedOrientations = orientations;
-        _appliedVideoSize = _playerVideoSize;
-        if (orientations == null) return;
-        await SystemChrome.setPreferredOrientations(orientations);
+        if (orientations != null) {
+          final size = _playerVideoSize;
+          await _windowOrientation.set(orientations.single);
+          _appliedOrientations = orientations;
+          _appliedVideoSize = size;
+        }
+        // A system-bar failure must never prevent the rotation request.
+        await _setSystemUiMode(SystemUiMode.immersiveSticky);
       } else {
         _appliedOrientations = null;
         _appliedVideoSize = Size.zero;
         await _restoreSystemUi();
       }
     });
-    _systemUiUpdates = operation.catchError((Object _) {});
+    _systemUiUpdates = operation.catchError((Object error) {
+      debugPrint('Player orientation update failed: $error');
+      if (mounted) {
+        ScaffoldMessenger.maybeOf(
+          context,
+        )?.showSnackBar(const SnackBar(content: Text('屏幕旋转失败，请退出全屏后重试')));
+      }
+    });
     await _systemUiUpdates;
   }
 
@@ -1507,6 +1521,7 @@ class _VideoPlayerChromeState extends State<VideoPlayerChrome>
   /// Note: 未知尺寸不得判成竖屏，否则连播会把横屏掰回竖屏 — 见
   /// .agents/notes/implemented/bug-fix/2026-09-11-player-orientation-on-auto-advance.md
   List<DeviceOrientation>? get _orientationsForVideo {
+    if (_forceLandscape) return const [DeviceOrientation.landscapeLeft];
     final size = _playerVideoSize;
     if (size.width <= 0 || size.height <= 0) return null;
     return size.width > size.height
@@ -1537,9 +1552,19 @@ class _VideoPlayerChromeState extends State<VideoPlayerChrome>
 
   Future<void> _restoreSystemUi() async {
     try {
-      await SystemChrome.setPreferredOrientations([]);
-      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
-    } catch (_) {}
+      await _windowOrientation.set(null);
+    } catch (error) {
+      debugPrint('Player orientation restore failed: $error');
+    }
+    await _setSystemUiMode(SystemUiMode.edgeToEdge);
+  }
+
+  Future<void> _setSystemUiMode(SystemUiMode mode) async {
+    try {
+      await SystemChrome.setEnabledSystemUIMode(mode);
+    } catch (error) {
+      debugPrint('Player system bar update failed: $error');
+    }
   }
 
   @override
@@ -2460,19 +2485,27 @@ class _VideoPlayerChromeState extends State<VideoPlayerChrome>
         ),
       );
 
-  /// 当前短剧截图使用 `aqh.xml` 的 5dp 纵向内边距；通用播放器保留
-  /// `aqi.xml` 的 8dp。官方存在配置分支，不能把其中一套当作唯一规格。
-  Widget _fullscreenPill() => Semantics(
+  /// Keep the manual orientation choice beside automatic fullscreen, outside
+  /// the video-only fullscreen view.
+  Widget _fullscreenPill() => Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Flexible(child: _fullscreenAction(forceLandscape: false)),
+      const SizedBox(width: 8),
+      Flexible(child: _fullscreenAction(forceLandscape: true)),
+    ],
+  );
+
+  Widget _fullscreenAction({required bool forceLandscape}) => Semantics(
     button: true,
     child: GestureDetector(
-      key: const ValueKey('player-fullscreen-pill'),
-      onTap: _toggleFullScreen,
+      key: ValueKey(
+        forceLandscape ? 'player-force-landscape' : 'player-fullscreen-pill',
+      ),
+      onTap: () => _toggleFullScreen(forceLandscape: forceLandscape),
       behavior: HitTestBehavior.opaque,
       child: Container(
-        padding: EdgeInsets.symmetric(
-          horizontal: 16,
-          vertical: widget.shortSeries ? 5 : 8,
-        ),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
         decoration: BoxDecoration(
           color: const Color(0xB3262626),
           borderRadius: BorderRadius.circular(8),
@@ -2480,19 +2513,22 @@ class _VideoPlayerChromeState extends State<VideoPlayerChrome>
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Image.asset(
-              'assets/images/drama/fullscreen.webp',
-              width: 20,
-              height: 20,
-              fit: BoxFit.contain,
-            ),
+            if (forceLandscape)
+              const Icon(Icons.screen_rotation, size: 18, color: Colors.white)
+            else
+              Image.asset(
+                'assets/images/drama/fullscreen.webp',
+                width: 18,
+                height: 18,
+                fit: BoxFit.contain,
+              ),
             const SizedBox(width: 4),
-            const Flexible(
+            Flexible(
               child: Text(
-                '全屏观看',
+                forceLandscape ? '强制横屏' : '全屏观看',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: TextStyle(
+                style: const TextStyle(
                   fontSize: 14,
                   fontWeight: FontWeight.bold,
                   color: Colors.white,
@@ -2803,7 +2839,12 @@ class _VideoPlayerChromeState extends State<VideoPlayerChrome>
             _fullScreen ? Icons.fullscreen_exit : Icons.fullscreen,
             _toggleFullScreen,
           ),
-        ],
+          _transportButton(
+            '强制横屏',
+            Icons.screen_rotation,
+            () => _toggleFullScreen(forceLandscape: true),
+          ),
+        ].map((control) => Flexible(child: control)).toList(),
       ),
     ),
   );

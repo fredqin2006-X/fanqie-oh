@@ -374,7 +374,8 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
                 watchedIds: _watchedIds,
                 initialDetail: _seriesDetail,
                 historyStore: widget.historyStore,
-                hasPlaybackProgress: (_player?.position.inMilliseconds ?? 0) > 0,
+                hasPlaybackProgress:
+                    (_player?.position.inMilliseconds ?? 0) > 0,
                 seriesLoader: widget.seriesLoader,
                 onOpenRelatedSeries: (entry) {
                   Navigator.of(context).pop();
@@ -959,9 +960,10 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
         final request = _sources.request(episode, refresh: refresh);
         trace.source = request.origin.name;
         var online = await request.future;
-        // 会话内记住的画质选择（官方=引擎当前档）：同一集重新加载时沿用。
-        final chosen = _chosen[episode.itemId];
-        if (chosen != null) online = online.withVariant(chosen);
+        online = online.withPreferredResolution(
+          await PlayerPreferences.loadDefaultResolution(),
+          chosen: _chosen[episode.itemId],
+        );
         source = online;
       }
       if (!_current(generation)) return;
@@ -1114,9 +1116,8 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
   }
 
   /// The source the current player was created from (includes the rendition
-  /// list), and the session-level quality choice per episode id. The official
-  /// client keeps the resolution on the engine for the session only; no
-  /// cross-launch preference exists there, so none is stored here either.
+  /// list), and a manual quality override per episode. New episodes use the
+  /// saved default resolution; manual choices remain local to this session.
   EpisodeSource? _currentSource;
   final Map<String, EpisodeVariant> _chosen = {};
 

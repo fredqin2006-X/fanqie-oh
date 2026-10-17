@@ -371,9 +371,10 @@ class InlineVideoPlayback {
       }
       activeVid.value = episodes[index].itemId;
       var source = await _sources.request(episodes[index]).future;
-      // 会话内记住的画质选择（官方=引擎当前档）：同一集再次激活时沿用。
-      final chosen = _chosen[episodes[index].itemId];
-      if (chosen != null) source = source.withVariant(chosen);
+      source = source.withPreferredResolution(
+        await PlayerPreferences.loadDefaultResolution(),
+        chosen: _chosen[episodes[index].itemId],
+      );
       _currentSource = source;
       if (!_current(generation)) return;
       final uri = Uri.tryParse(source.url);
@@ -436,9 +437,8 @@ class InlineVideoPlayback {
   /// list. Null while nothing plays.
   EpisodeSource? _currentSource;
 
-  /// Session-level quality choice per episode id. The official client keeps
-  /// the resolution on the engine instance for the session only; there is no
-  /// cross-launch preference evidence, so none is stored here either.
+  /// Manual quality choices per episode override the saved default for this
+  /// session. They do not change the user's global resolution setting.
   final Map<String, EpisodeVariant> _chosen = {};
 
   /// Renditions of the playing episode, best-quality first. Empty while
@@ -466,6 +466,8 @@ class InlineVideoPlayback {
     final player = _player;
     final series = _active;
     if (source == null || player == null || series == null || _disposed) return;
+    final episodeId = activeEpisode?.itemId;
+    if (episodeId == null) return;
     if (source.variants.every((v) => v.url != variant.url)) return;
     if (variant.url == source.url) return;
     final generation = ++_generation;
@@ -474,7 +476,7 @@ class InlineVideoPlayback {
     _detachSubscriptions();
     if (identical(_player, player)) _player = null;
     _currentSource = source.withVariant(variant);
-    _chosen[series.id] = variant;
+    _chosen[episodeId] = variant;
     // A replacement texture must not inherit the previous rendition's frame,
     // size, or rotation. The layer keeps its cover until the new stream is ready.
     textureId.value = null;

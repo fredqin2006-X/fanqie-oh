@@ -150,12 +150,16 @@ void main() {
       expect(tester.takeException(), isNull);
       Rect rect(String key) => tester.getRect(find.byKey(ValueKey(key)));
       final pill = rect('player-fullscreen-pill');
+      final force = rect('player-force-landscape');
       final comments = rect('player-comment-button');
       final titleRect = tester.getRect(find.text(title));
       final seek = rect('video-seek-layer');
       final catalog = rect('player-catalog-bar');
       final clear = rect('player-clear-screen');
       expect(pill.overlaps(comments), isFalse);
+      expect(force.overlaps(comments), isFalse);
+      expect(force.overlaps(pill), isFalse);
+      expect(force.bottom, lessThan(titleRect.top));
       expect(pill.bottom, lessThan(titleRect.top));
       expect(comments.bottom, lessThan(titleRect.top));
       expect(seek.overlaps(catalog), isFalse);

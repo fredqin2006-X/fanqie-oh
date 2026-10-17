@@ -11,6 +11,7 @@ export class DisplayPlugin implements FlutterPlugin, MethodCallHandler, StreamHa
   private channel: EventChannel | null = null;
   private sink: EventSink | null = null;
   private win: window.Window | null = null;
+  private originalOrientation: window.Orientation | null = null;
   private active: boolean = true;
   private avoided = (_event: window.AvoidAreaOptions): void => { this.publish(); };
   private resized = (_size: window.Size): void => { this.publish(); };
@@ -60,7 +61,30 @@ export class DisplayPlugin implements FlutterPlugin, MethodCallHandler, StreamHa
     return reply;
   }
   private publish(): void { if (this.win && this.sink) { this.sink.success(this.metrics()); } }
+  private async setOrientation(direction: string): Promise<void> {
+    if (direction !== 'portrait' && direction !== 'landscape' && direction !== 'restore') {
+      throw new Error('ORIENTATION');
+    }
+    await this.connect();
+    const win = this.win;
+    if (!win) { throw new Error('WINDOW'); }
+    if (direction === 'restore') {
+      if (this.originalOrientation !== null) {
+        await win.setPreferredOrientation(this.originalOrientation);
+        this.originalOrientation = null;
+      }
+      return;
+    }
+    const original = this.originalOrientation ?? win.getPreferredOrientation();
+    await win.setPreferredOrientation(direction === 'landscape' ? window.Orientation.LANDSCAPE : window.Orientation.PORTRAIT);
+    this.originalOrientation = original;
+  }
   onMethodCall(call: MethodCall, result: MethodResult): void {
+    if (call.method === 'setOrientation') {
+      this.setOrientation(call.argument('orientation') as string).then(() => result.success(null))
+        .catch(() => result.error('ORIENTATION_FAILED', '屏幕方向设置失败', null));
+      return;
+    }
     if (call.method !== 'cutoutInsets') { result.notImplemented(); return; }
     this.connect().then(() => result.success(this.metrics()))
       .catch(() => result.error('DISPLAY_UNAVAILABLE', '窗口避让区域暂不可用', null));

@@ -20,10 +20,14 @@ class _OrientationLog {
       last!.isNotEmpty &&
       last!.every((value) => value.startsWith('DeviceOrientation.portrait'));
 
-  void install(WidgetTester tester) {
+  void install(WidgetTester tester, {bool systemBarsFail = false}) {
     tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
       SystemChannels.platform,
       (call) async {
+        if (systemBarsFail &&
+            call.method == 'SystemChrome.setEnabledSystemUIMode') {
+          throw PlatformException(code: 'BARS_UNAVAILABLE');
+        }
         if (call.method == 'SystemChrome.setPreferredOrientations') {
           final arguments = call.arguments;
           if (arguments is List) {
@@ -140,11 +144,83 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
     await player.dispose();
   });
+
+  for (final unknownSize in [true, false]) {
+    testWidgets(
+      'manual landscape overrides ${unknownSize ? 'unknown' : 'portrait'} size until back',
+      (tester) async {
+        final orientations = _OrientationLog()..install(tester);
+        final player = FakeNativePlayer(
+          width: unknownSize ? 0 : 720,
+          height: unknownSize ? 0 : 1280,
+        );
+        await tester.binding.setSurfaceSize(const Size(360, 800));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        await tester.pumpWidget(_app(player, shortSeries: true));
+        await tester.pumpAndSettle();
+        final auto = tester.getRect(
+          find.byKey(const ValueKey('player-fullscreen-pill')),
+        );
+        final force = tester.getRect(
+          find.byKey(const ValueKey('player-force-landscape')),
+        );
+        expect(auto.overlaps(force), isFalse);
+        expect(force.center.dy, auto.center.dy);
+        await tester.tap(find.byKey(const ValueKey('player-force-landscape')));
+        await tester.pumpAndSettle();
+        expect(orientations.last, ['DeviceOrientation.landscapeLeft']);
+        expect(find.text('强制横屏'), findsNothing);
+        expect(find.byType(IconButton), findsNothing);
+
+        // Late source metadata and episode replacement cannot cancel the choice.
+        player.width = 1080;
+        player.height = 1920;
+        await tester.pumpWidget(_app(player, shortSeries: true));
+        await tester.pumpAndSettle();
+        expect(orientations.last, ['DeviceOrientation.landscapeLeft']);
+        final next = FakeNativePlayer(width: 720, height: 1280);
+        await tester.pumpWidget(_app(next, shortSeries: true));
+        await tester.pumpAndSettle();
+        expect(orientations.last, ['DeviceOrientation.landscapeLeft']);
+
+        await tester.binding.handlePopRoute();
+        await tester.pumpAndSettle();
+        expect(orientations.last, isEmpty);
+        // A new automatic fullscreen session must follow the source again.
+        await tester.tap(find.byKey(const ValueKey('player-fullscreen-pill')));
+        await tester.pumpAndSettle();
+        expect(orientations.last, ['DeviceOrientation.portraitUp']);
+        await tester.pumpWidget(const SizedBox.shrink());
+        await player.dispose();
+        await next.dispose();
+      },
+    );
+  }
+
+  testWidgets(
+    'system bar errors cannot skip fullscreen rotation or restoration',
+    (tester) async {
+      final orientations = _OrientationLog()
+        ..install(tester, systemBarsFail: true);
+      final player = FakeNativePlayer(width: 1920, height: 1080);
+      await tester.pumpWidget(_app(player));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('全屏'));
+      await tester.pumpAndSettle();
+      expect(orientations.last, ['DeviceOrientation.landscapeLeft']);
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+      expect(orientations.last, isEmpty);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await player.dispose();
+    },
+  );
 }
 
-Widget _app(FakeNativePlayer player) => MaterialApp(
+Widget _app(FakeNativePlayer player, {bool shortSeries = false}) => MaterialApp(
   home: VideoPlayerChrome(
     player: player,
+    shortSeries: shortSeries,
     episodes: [
       Chapter(itemId: '1', title: '第一集', volumeName: ''),
       Chapter(itemId: '2', title: '第二集', volumeName: ''),

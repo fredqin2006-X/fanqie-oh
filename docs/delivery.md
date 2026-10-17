@@ -2,7 +2,17 @@
 
 更新：2026-10-17（Asia/Shanghai）。当前为移植中的内部验证实现，**不是完整验收或正式发布版本**。产品 UI 沿用安卓；实际能力、已知限制及未验项见 [实施验收记录](acceptance/2026-10-16-porting.md)。
 
-## 最新全屏与开孔适配包
+## 最新强制横屏与默认分辨率包
+
+- 文件：`local-reports/delivery/fqapp-1.0.120-20261017-force-landscape-resolution-arm64-release-unsigned.hap`
+- ARM64 Release，正常 `lib/main.dart`，版本 `1.0.120+125`，debug=false，最低 HarmonyOS 6.1 / API 23；包内 min/target 为 `60100023`，ARM64 应用、引擎与播放器 ELF 架构已核对。
+- 构建记录：`20261017T021719705Z-cf8b7f`；104,943,905 字节。
+- SHA-256：`0e85235a8f832c2c3ed3219935e3fb026ba012cc9e7445317ea9f16dcd872cfd`。
+- “全屏观看”旁新增“强制横屏”，直接设置鸿蒙主窗口方向，返回恢复先前策略；保留全屏视频/弹幕及开孔避让。设置 → 短剧新增默认分辨率，未设置或缺档时选择最高可用档位；推荐流与完整播放页共用规则。
+- 107 项相关 Flutter 测试通过，修改文件分析无问题；[实现及验证范围](acceptance/2026-10-17-rotation-resolution.md)。用户反馈上一包横屏失败，本包的物理窗口旋转效果仍待人工真机复测，不以主机测试或编译代替验收。
+- 未签名，沿用 DevEco 研发签名/profile 后安装；没有推送或发布。额外 x86_64 原生依赖与上一包相同，Flutter 应用与引擎为 ARM64。
+
+## 上一版全屏与开孔适配包
 
 - 文件：`local-reports/delivery/fqapp-1.0.120-20261017-fullscreen-cutout-arm64-release-unsigned.hap`
 - ARM64 Release，正常 `lib/main.dart`，版本 `1.0.120+125`，debug=false，最低 HarmonyOS 6.1 / API 23。

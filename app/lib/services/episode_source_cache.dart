@@ -32,6 +32,41 @@ class EpisodeSource {
   EpisodeSource withVariant(EpisodeVariant variant) =>
       EpisodeSource(variant.url, variant.keyHex, variants);
 
+  /// A manual choice wins for this episode. An unavailable default falls back
+  /// to the highest rendition, independent of the server's selected URL/order.
+  EpisodeSource withPreferredResolution(
+    int resolution, {
+    EpisodeVariant? chosen,
+  }) {
+    if (variants.isEmpty) return this;
+    if (chosen != null) {
+      for (final variant in variants) {
+        if (variant.url == chosen.url ||
+            (variant.name == chosen.name && variant.height == chosen.height)) {
+          return withVariant(variant);
+        }
+      }
+    }
+    var best = variants.first;
+    for (final variant in variants) {
+      final value = _variantResolution(variant);
+      if (resolution > 0 && value == resolution) return withVariant(variant);
+      if (value > _variantResolution(best)) best = variant;
+    }
+    return withVariant(best);
+  }
+
+  static int _variantResolution(EpisodeVariant variant) {
+    // Portrait 720P streams often report height=1280. Prefer the quality label
+    // over raw pixel height when matching the user's resolution setting.
+    final label = variant.name.toUpperCase();
+    final number = RegExp(r'(\d+)\s*P').firstMatch(label)?.group(1);
+    if (number != null) return int.parse(number);
+    if (label.contains('4K')) return 2160;
+    if (label.contains('2K')) return 1440;
+    return variant.height;
+  }
+
   factory EpisodeSource.fromResponse(Map<String, dynamic> response) {
     final data = response['data'] is Map
         ? Map<String, dynamic>.from(response['data'] as Map)
@@ -74,7 +109,11 @@ class EpisodeSource {
         );
       }
     }
-    return EpisodeSource(url, (data['key_hex'] ?? '').toString().trim(), variants);
+    return EpisodeSource(
+      url,
+      (data['key_hex'] ?? '').toString().trim(),
+      variants,
+    );
   }
 }
 

@@ -3,6 +3,31 @@ import 'package:shared_preferences/shared_preferences.dart';
 class PlayerPreferences {
   static const _playbackRateKey = 'player_playback_rate';
   static const _autoAdvanceKey = 'player_auto_advance';
+  static const _defaultResolutionKey = 'player_default_resolution';
+  static const defaultResolutions = [0, 2160, 1440, 1080, 720, 540, 480, 360];
+  static String resolutionLabel(int resolution) =>
+      resolution == 0 ? '最高可用' : '${resolution}P';
+
+  static Future<int> loadDefaultResolution() async {
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      final value = preferences.get(_defaultResolutionKey);
+      return value is int && defaultResolutions.contains(value) ? value : 0;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  static Future<void> saveDefaultResolution(int resolution) async {
+    final preferences = await SharedPreferences.getInstance();
+    if (!await preferences.setInt(
+      _defaultResolutionKey,
+      defaultResolutions.contains(resolution) ? resolution : 0,
+    )) {
+      throw StateError('Could not save default video resolution');
+    }
+  }
+
   static Future<void>? _autoAdvanceWrites;
   static const playbackRates = <double>[0.75, 1, 1.25, 1.5, 1.75, 2];
 

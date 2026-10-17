@@ -12,6 +12,7 @@ import '../services/backend_service.dart';
 import '../services/book_open_preferences.dart';
 import '../services/drama_mute_preferences.dart';
 import '../services/library_store.dart';
+import '../services/player_preferences.dart';
 import '../widgets/home/home_design.dart';
 import 'about_page.dart';
 import 'cached_books_page.dart';
@@ -64,8 +65,8 @@ class SettingsPage extends StatelessWidget {
       SettingsCategory(
         icon: LucideIcons.film,
         title: '短剧',
-        subtitle: '播放',
-        items: [_muteWhenColdStartItem()],
+        subtitle: '播放、默认分辨率',
+        items: [_muteWhenColdStartItem(), _defaultResolutionItem()],
       ),
       SettingsCategory(
         icon: LucideIcons.database,
@@ -371,7 +372,8 @@ class SettingsPage extends StatelessWidget {
       valueListenable: AudioPreferences.instance.backgroundPlayback,
       builder: (context, value, _) => Switch(
         value: value,
-        onChanged: (v) => unawaited(AudioPreferences.instance.setBackgroundPlayback(v)),
+        onChanged: (v) =>
+            unawaited(AudioPreferences.instance.setBackgroundPlayback(v)),
       ),
     ),
     onTap: (context, setState) {
@@ -381,6 +383,58 @@ class SettingsPage extends StatelessWidget {
   );
 
   // ── 短剧 ──────────────────────────────────────────────────────────────
+
+  SettingsItem _defaultResolutionItem() => SettingsItem(
+    icon: LucideIcons.monitor,
+    title: '默认分辨率',
+    subtitle: '未提供所选分辨率时使用最高分辨率',
+    trailingBuilder: (context) => FutureBuilder<int>(
+      future: PlayerPreferences.loadDefaultResolution(),
+      builder: (context, snapshot) => Text(
+        PlayerPreferences.resolutionLabel(snapshot.data ?? 0),
+        style: TextStyle(color: Theme.of(context).colorScheme.outline),
+      ),
+    ),
+    onTap: (context, setState) async {
+      final current = await PlayerPreferences.loadDefaultResolution();
+      if (!context.mounted) return;
+      final selected = await showDialog<int>(
+        context: context,
+        builder: (dialog) => SimpleDialog(
+          title: const Text('默认分辨率'),
+          children: [
+            RadioGroup<int>(
+              groupValue: current,
+              onChanged: (value) {
+                if (value != null) Navigator.pop(dialog, value);
+              },
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (final value in PlayerPreferences.defaultResolutions)
+                    RadioListTile<int>(
+                      value: value,
+                      title: Text(PlayerPreferences.resolutionLabel(value)),
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
+      if (selected == null || !context.mounted) return;
+      try {
+        await PlayerPreferences.saveDefaultResolution(selected);
+      } catch (_) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(const SnackBar(content: Text('默认分辨率未能保存，请重试')));
+        }
+      }
+      if (context.mounted) setState(() {});
+    },
+  );
 
   /// 官方设置项「开启应用时默认静音」（`GlobalMuteConfig` 标题，持久层
   /// `open_mute_when_cold_start`，默认 false＝有声起播）。
