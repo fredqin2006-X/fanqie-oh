@@ -9,6 +9,21 @@ class PlayerWindowOrientation {
   final bool? harmony;
   static const _channel = MethodChannel('fqapp/display');
 
+  Future<void> setFullscreen(bool fullscreen) {
+    if (harmony ?? Platform.operatingSystem == 'ohos') {
+      // This embedding's setEnabledSystemUIMode success path never replies.
+      // Manual overlays use an acknowledged channel method, so initial
+      // fullscreen with unknown video size cannot block later rotation/back.
+      return SystemChrome.setEnabledSystemUIMode(
+        SystemUiMode.manual,
+        overlays: fullscreen ? const [] : SystemUiOverlay.values,
+      );
+    }
+    return SystemChrome.setEnabledSystemUIMode(
+      fullscreen ? SystemUiMode.immersiveSticky : SystemUiMode.edgeToEdge,
+    );
+  }
+
   Future<void> set(DeviceOrientation? orientation) async {
     assert(
       orientation == null ||

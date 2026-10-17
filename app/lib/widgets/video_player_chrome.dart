@@ -1561,7 +1561,9 @@ class _VideoPlayerChromeState extends State<VideoPlayerChrome>
 
   Future<void> _setSystemUiMode(SystemUiMode mode) async {
     try {
-      await SystemChrome.setEnabledSystemUIMode(mode);
+      await _windowOrientation.setFullscreen(
+        mode == SystemUiMode.immersiveSticky,
+      );
     } catch (error) {
       debugPrint('Player system bar update failed: $error');
     }

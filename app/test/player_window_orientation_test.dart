@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:fqapp/platform/player_window_orientation.dart';
@@ -12,6 +14,46 @@ void main() {
     messenger.setMockMethodCallHandler(display, null);
     messenger.setMockMethodCallHandler(SystemChannels.platform, null);
   });
+
+  test(
+    'Harmony fullscreen acknowledges before late rotation and back',
+    () async {
+      final calls = <String>[];
+      final overlays = <Object?>[];
+      final neverReplies = Completer<Object?>();
+      messenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+        if (call.method == 'SystemChrome.setEnabledSystemUIMode') {
+          // Reproduce the embedding's missing success reply. Using this method
+          // would leave this sequence pending rather than reaching rotation.
+          return neverReplies.future;
+        }
+        calls.add(call.method);
+        overlays.add(call.arguments);
+        return null;
+      });
+      messenger.setMockMethodCallHandler(display, (call) async {
+        calls.add((call.arguments as Map)['orientation'] as String);
+        return null;
+      });
+      const orientation = PlayerWindowOrientation(harmony: true);
+      await orientation.setFullscreen(true).timeout(const Duration(seconds: 1));
+      await orientation.set(DeviceOrientation.landscapeLeft);
+      await orientation.set(null);
+      await orientation
+          .setFullscreen(false)
+          .timeout(const Duration(seconds: 1));
+      expect(calls, [
+        'SystemChrome.setEnabledSystemUIOverlays',
+        'landscape',
+        'restore',
+        'SystemChrome.setEnabledSystemUIOverlays',
+      ]);
+      expect(overlays, [
+        [],
+        ['SystemUiOverlay.top', 'SystemUiOverlay.bottom'],
+      ]);
+    },
+  );
 
   test(
     'Harmony uses fixed native orientations and restores the window policy',
