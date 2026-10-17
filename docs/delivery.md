@@ -4,7 +4,15 @@
 
 ## 最新强制横屏与默认分辨率包
 
-**横屏状态更新：** 下列包经用户反馈仍不能横屏，不作为横屏修复通过依据。后续已完成模拟器方向队列和旋转边距修复，见 [原生运行复测](acceptance/2026-10-17-emulator-rotation.md)；按用户要求，本轮先供查看模拟器，不交付新 ARM64 安装包。
+**横屏状态更新：** 已在 Pura 90 Pro API 26 x86_64 模拟器验证强制横屏、视频持续播放、返回恢复竖屏和旋转后安全区；详见 [原生运行复测](acceptance/2026-10-17-emulator-rotation.md)。以下是基于该代码构建的最新 ARM64 release 包，仍需用户使用匹配签名/profile 后进行真机复测。
+
+- 文件：`local-reports/delivery/fqapp-1.0.120-20261017-emulator-verified-rotation-arm64-release-unsigned.hap`
+- ARM64 Release，正常 `lib/main.dart`，版本 `1.0.120+125`，debug=false，最低 HarmonyOS 6.1 / API 23；包内 min/target 为 `60100023`，关键应用、引擎和核心库 ELF 为 AArch64。
+- 构建记录：`20261017T025503063Z-7778b8`；104,944,773 字节。
+- SHA-256：`91825118440a8f420925f7639e487ee3c9bfde7070e1efb467882aeb94583c9c`。
+- 未签名，沿用 DevEco 研发签名/profile 后安装；本次没有 ARM64 真机验收。
+
+### 上一版强制横屏与默认分辨率包
 
 - 文件：`local-reports/delivery/fqapp-1.0.120-20261017-force-landscape-resolution-arm64-release-unsigned.hap`
 - ARM64 Release，正常 `lib/main.dart`，版本 `1.0.120+125`，debug=false，最低 HarmonyOS 6.1 / API 23；包内 min/target 为 `60100023`，ARM64 应用、引擎与播放器 ELF 架构已核对。
