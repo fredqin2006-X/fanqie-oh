@@ -2,6 +2,7 @@ import { FlutterPlugin, FlutterPluginBinding, MethodCall, MethodCallHandler, Met
   EventChannel, StreamHandler, EventSink } from '@ohos/flutter_ohos';
 import { common } from '@kit.AbilityKit';
 import { window } from '@kit.ArkUI';
+import { hilog } from '@kit.PerformanceAnalysisKit';
 
 // Physical pixels, relative to the current window. Flutter converts using its
 // own view density so split-window and rotation updates use the same units.
@@ -62,12 +63,16 @@ export class DisplayPlugin implements FlutterPlugin, MethodCallHandler, StreamHa
   }
   private publish(): void { if (this.win && this.sink) { this.sink.success(this.metrics()); } }
   private async setOrientation(direction: string): Promise<void> {
+    hilog.info(0x0000, 'FqDisplay', 'orientation request %{public}s', direction);
     if (direction !== 'portrait' && direction !== 'landscape' && direction !== 'restore') {
       throw new Error('ORIENTATION');
     }
     await this.connect();
     const win = this.win;
     if (!win) { throw new Error('WINDOW'); }
+    const before = win.getWindowProperties();
+    hilog.info(0x0000, 'FqDisplay', 'window %{public}d type %{public}d preferred %{public}d size %{public}dx%{public}d',
+      before.id, before.type, win.getPreferredOrientation(), before.windowRect.width, before.windowRect.height);
     if (direction === 'restore') {
       if (this.originalOrientation !== null) {
         await win.setPreferredOrientation(this.originalOrientation);
@@ -77,12 +82,16 @@ export class DisplayPlugin implements FlutterPlugin, MethodCallHandler, StreamHa
     }
     const original = this.originalOrientation ?? win.getPreferredOrientation();
     await win.setPreferredOrientation(direction === 'landscape' ? window.Orientation.LANDSCAPE : window.Orientation.PORTRAIT);
+    hilog.info(0x0000, 'FqDisplay', 'orientation accepted %{public}d', win.getPreferredOrientation());
     this.originalOrientation = original;
   }
   onMethodCall(call: MethodCall, result: MethodResult): void {
     if (call.method === 'setOrientation') {
       this.setOrientation(call.argument('orientation') as string).then(() => result.success(null))
-        .catch(() => result.error('ORIENTATION_FAILED', '屏幕方向设置失败', null));
+        .catch(() => {
+          hilog.error(0x0000, 'FqDisplay', 'orientation failed');
+          result.error('ORIENTATION_FAILED', '屏幕方向设置失败', null);
+        });
       return;
     }
     if (call.method !== 'cutoutInsets') { result.notImplemented(); return; }
