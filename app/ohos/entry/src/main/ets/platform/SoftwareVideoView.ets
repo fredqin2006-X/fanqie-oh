@@ -9,7 +9,7 @@ struct SoftwareVideoSurface {
   view: SoftwareVideoView | null = null;
   private controller: XComponentController = new XComponentController();
   build() {
-    XComponent({ id: `fq-video-${this.view?.viewId ?? -1}`, type: XComponentType.SURFACE, controller: this.controller })
+    XComponent({ id: `fq-video-${this.view?.viewId ?? -1}`, type: XComponentType.TEXTURE, controller: this.controller })
       .width('100%').height('100%')
       .onTouch((event: TouchEvent) => this.view?.forwardTouch(event))
       .onLoad(() => this.view?.attach(this.controller.getXComponentSurfaceId()))
