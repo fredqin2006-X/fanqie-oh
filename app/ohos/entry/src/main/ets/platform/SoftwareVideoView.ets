@@ -11,6 +11,7 @@ struct SoftwareVideoSurface {
   build() {
     XComponent({ id: `fq-video-${this.view?.viewId ?? -1}`, type: XComponentType.SURFACE, controller: this.controller })
       .width('100%').height('100%')
+      .onTouch((event: TouchEvent) => this.view?.forwardTouch(event))
       .onLoad(() => this.view?.attach(this.controller.getXComponentSurfaceId()))
       .onDestroy(() => this.view?.detach())
   }
@@ -31,6 +32,17 @@ class SoftwareVideoView extends PlatformView {
   getView(): WrappedBuilder<[Params]> { return new WrappedBuilder(videoBuilder); }
   attach(surface: string): void {
     if (!this.disposed) { this.changed(this.playerId, this.viewId, surface); }
+  }
+  forwardTouch(event: TouchEvent): void {
+    if (this.disposed) { return; }
+    // Hybrid DISPLAY nodes receive native input above Flutter's render surface.
+    // Return it to Flutter's gesture arena so the existing controls own taps,
+    // seeks and page swipes. Do not feed Flutter-injected events back again.
+    if (this.injectedTimestamps.has(event.timestamp)) {
+      this.injectedTimestamps.delete(event.timestamp);
+      return;
+    }
+    this.touchDispatcher?.(this.viewId, event);
   }
   detach(): void { this.changed(this.playerId, this.viewId, '0'); }
   dispose(): void { this.disposed = true; this.detach(); }
