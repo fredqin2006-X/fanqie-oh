@@ -2,7 +2,18 @@
 
 更新：2026-10-17（Asia/Shanghai）。当前为移植中的内部验证实现，**不是完整验收或正式发布版本**。产品 UI 沿用安卓；实际能力、已知限制及未验项见 [实施验收记录](acceptance/2026-10-16-porting.md)。
 
-## 本地文件
+## 最新播放修复包
+
+源码 `49fc140`，正常 `lib/main.dart` 入口，ARM64 Release，版本 `1.0.120+125`，debug=false，最低 HarmonyOS 6.1 / API 23。构建记录 `20261017T013108550Z-fc2ada`。
+
+- 文件：`local-reports/delivery/fqapp-1.0.120-20261017-playback-fix-arm64-release-unsigned.hap`
+- 大小：104,889,617 字节。
+- SHA-256：`c197b3640df0804007ae44d5b8faed879eb5544483d2fa925d352af33a522d4a`。
+- 未签名；需在 DevEco 配置匹配手机的研发签名/profile 后安装，交由用户人工真机复测。没有推送或发布。
+- 已核实 ARM64 应用、引擎与两份自编译核心库的 ELF 架构；原生配置还打入额外 x86_64 依赖，但没有 x86_64 Flutter 应用/引擎，本包仅供 ARM64 使用。
+- 本轮模拟器播放结果见 [黑屏修复记录](acceptance/2026-10-17-playback.md)。以下原交付文件保留为历史版本，不包含本次播放修复。
+
+## 历史本地文件
 
 - 正常产品入口：`app/lib/main.dart`，原始 Flutter 页面和组件直接复用。
 - DevEco 工程：`app/ohos/`，Stage / HarmonyOS，min/target `6.1.0(23)`，compile API 26。
@@ -12,7 +23,7 @@
 
 HAP、SDK、动态库、签名材料和设备数据均忽略，不提交到 Git。没有上传、推送或发布。ARM64 包使用正常 `main.dart`，不导入 debug 验证入口；当前没有 ARM64 真机运行或签名证据。x86_64 模拟器允许安装未签名 HAP，不能据此承诺普通手机可直接安装。
 
-## 本次校验结果
+## 历史包校验结果
 
 ARM64 构建记录：`20261016T201654062Z-a2855b`（UTC 时间；北京时间 2026-10-17），包含 TTS 播报完成修复。包大小 **37,978,878 字节**，SHA-256：
 
