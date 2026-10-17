@@ -8,6 +8,8 @@
 #include <unordered_map>
 #include <vector>
 
+extern "C" int fq_cpu_video_factories();
+
 namespace {
 struct Event { int what, a, b; };
 struct Session {
@@ -83,8 +85,10 @@ napi_value Create(napi_env env, napi_callback_info info) {
     if (url.empty()) return Number(env, -1);
     auto s = std::make_shared<Session>();
     std::call_once(initialized, [] { ijkmp_global_init(); ijkmp_global_set_log_level(16); });
+    const int factories = fq_cpu_video_factories();
     s->player = ijkmp_android_create(MessageLoop);
     if (!s->player) { Close(*s); return Number(env, -1); }
+    if (fq_cpu_video_factories() != factories + 1) { Close(*s); return Number(env, -1); }
     ijkmp_set_weak_thiz(s->player, s.get());
     ijkmp_android_set_surface(s->player, s->window, false);
     // Force FFmpeg software decoding: the fallback must not retry the failed codec.

@@ -253,12 +253,14 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
     const player = item.player; item.player = null;
     try { await player?.release(); } catch (_) { /* failed system decoder */ }
     if (item.disposed || !item.texture) { return; }
-    // Prepare without a surface. Once prepared, Flutter mounts the native
-    // XComponent and its surface is attached without delaying player creation.
+    // Feed RGBA frames to Flutter's existing texture without IJK owning any EGL
+    // resources. The texture remains owned by Flutter through decoder shutdown.
     const id = software.create(item.playable);
     if (id <= 0) { throw new Error('SOFTWARE_PLAYER_CREATE_FAILED'); }
     item.softwareId = id;
-    this.emit(item, 'nativeSurface', true);
+    if (software.setSurface(id, item.texture.getSurfaceId().toString()) < 0) {
+      throw new Error('SOFTWARE_SURFACE_FAILED');
+    }
     hilog.info(0x0000, 'FqPlayer', 'software fallback player=%{public}d', item.id);
     item.pollTimer = setInterval(() => this.pollSoftware(item), 200);
   }
