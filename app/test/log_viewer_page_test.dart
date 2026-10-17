@@ -272,7 +272,7 @@ void main() {
     await tester.tap(find.text('导出应用 + 核心'));
     await tester.pumpAndSettle();
 
-    expect(sink.fileName, startsWith('fqapp-all-logs-'));
+    expect(sink.fileName, startsWith('fanqie-oh-all-logs-'));
     expect(sink.text, contains('应用日志：1 条'));
     expect(sink.text, contains('核心日志：1 条'));
     expect(sink.text, contains('===== 应用日志 ====='));

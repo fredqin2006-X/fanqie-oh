@@ -62,7 +62,7 @@ class HomeHero extends StatelessWidget {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Text(
-                      'fqapp',
+                      '番茄OH',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(

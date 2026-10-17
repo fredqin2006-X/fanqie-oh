@@ -27,7 +27,7 @@ export class BackgroundMedia {
     this.playing = playing; this.hasNext = call.argument('hasNext') === true; this.hasPrev = call.argument('hasPrev') === true;
     const title = call.argument('title') as string; const episode = call.argument('episode') as string;
     const duration = this.number(call.argument('durationMs'), 0, Number.MAX_SAFE_INTEGER, 0);
-    await this.session.setAVMetadata({ assetId: 'fqapp-listening', title: typeof title === 'string' ? title.slice(0, 500) : 'fqapp', artist: typeof episode === 'string' ? episode.slice(0, 500) : '', duration: duration });
+    await this.session.setAVMetadata({ assetId: 'fqapp-listening', title: typeof title === 'string' ? title.slice(0, 500) : '番茄OH', artist: typeof episode === 'string' ? episode.slice(0, 500) : '', duration: duration });
     await this.session.setAVPlaybackState({ state: playing ? avSession.PlaybackState.PLAYBACK_STATE_PLAY : avSession.PlaybackState.PLAYBACK_STATE_PAUSE,
       speed: this.number(call.argument('speed'), 0.125, 4, 1), position: { elapsedTime: this.number(call.argument('positionMs'), 0, duration || Number.MAX_SAFE_INTEGER, 0), updateTime: Date.now() } });
     if (playing && !this.running) {

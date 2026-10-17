@@ -1,17 +1,5 @@
-# fqapp
+# 番茄OH 应用源码
 
-A new Flutter project.
+Flutter 产品入口为 `lib/main.dart`，鸿蒙 Stage 工程位于 `ohos/`，Rust/C 核心位于 `rust/`、`native/`。
 
-## Getting Started
-
-This project is a starting point for a Flutter application.
-
-A few resources to get you started if this is your first Flutter project:
-
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
-
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+安装、工具版本、源码构建、验证范围和许可证见 [仓库 README](../README.md)。应用显示版本为 1.0.0（126）；Dart 包名 `fqapp` 与原生通道保持兼容。

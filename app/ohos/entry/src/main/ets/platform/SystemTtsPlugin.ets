@@ -41,7 +41,7 @@ export class SystemTtsPlugin implements FlutterPlugin, MethodCallHandler, Stream
             const rate = call.argument('rate') as number;
             if (!Number.isFinite(rate) || rate < 0.5 || rate > 2) { throw new Error('RATE'); }
             this.close(); const generation = this.generation;
-            const engine = await textToSpeech.createEngine({ language: 'zh-CN', person: 13, online: 1, extraParams: { name: 'fqapp', isBackStage: true } });
+            const engine = await textToSpeech.createEngine({ language: 'zh-CN', person: 13, online: 1, extraParams: { name: '番茄OH', isBackStage: true } });
             if (generation !== this.generation) { engine.shutdown(); throw new Error('CANCELLED'); }
             this.rate = rate; this.engine = engine;
             engine.setListener({

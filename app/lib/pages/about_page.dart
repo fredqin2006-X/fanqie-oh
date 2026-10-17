@@ -12,7 +12,7 @@ class AboutPage extends StatelessWidget {
   /// `version`. Without a package_info dependency the value is
   /// static, so test/about_version_test.dart parses the pubspec and fails the
   /// build check when the two drift apart after a version bump.
-  static const versionText = '1.0.120 (125)';
+  static const versionText = '1.0.0 (126)';
 
   /// Pixel width of the bundled logo (assets/images/app_logo.webp). The logo
   /// is displayed at 96dp, so it only needs re-decoding above 4× DPI; clamping
@@ -67,7 +67,7 @@ class AboutPage extends StatelessWidget {
           Column(
             children: [
               Text(
-                'fqapp',
+                '番茄OH',
                 textAlign: TextAlign.center,
                 style: theme.textTheme.titleLarge?.copyWith(
                   fontWeight: FontWeight.bold,
@@ -104,15 +104,22 @@ class AboutPage extends StatelessWidget {
               _AboutRow(
                 icon: Icons.code,
                 title: 'Source Code',
-                subtitle: 'github.com/ch6vip/fqapp',
-                url: 'https://github.com/ch6vip/fqapp',
+                subtitle: 'github.com/fredqin2006-X/fanqie-oh',
+                url: 'https://github.com/fredqin2006-X/fanqie-oh',
               ),
               Divider(height: 1, indent: 68),
               _AboutRow(
                 icon: Icons.feedback_outlined,
                 title: '问题反馈',
                 subtitle: '前往 GitHub Issues 提交',
-                url: 'https://github.com/ch6vip/fqapp/issues',
+                url: 'https://github.com/fredqin2006-X/fanqie-oh/issues',
+              ),
+              Divider(height: 1, indent: 68),
+              _AboutRow(
+                icon: Icons.favorite_border,
+                title: '上游项目',
+                subtitle: 'ch6vip/fqapp',
+                url: 'https://github.com/ch6vip/fqapp',
               ),
             ],
           ),
