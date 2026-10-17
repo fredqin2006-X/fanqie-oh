@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lottie/lottie.dart';
 
 import '../models/channel_tab.dart';
+import '../platform/display_safe_area.dart';
 import '../models/media_item.dart';
 import '../models/playlet_comment.dart';
 import '../models/series_detail.dart';
@@ -823,8 +824,7 @@ class _DramaPageState extends ConsumerState<DramaPage>
               danmakuEnabled: _feedDanmakuEnabled,
               onToggleDanmaku: () => unawaited(_toggleFeedDanmaku()),
               // 官方 `jm3.e`：弹幕设置入口在弹幕开关之后（与全页同门）。
-              onOpenDanmakuSettings: () =>
-                  _pendingFeedDanmakuSettings = true,
+              onOpenDanmakuSettings: () => _pendingFeedDanmakuSettings = true,
               // 官方 `jm3.t0`：行尾当前档 + 点击级联打开字号弹层。
               fontScaleLabel: ShortSeriesFontScale.label,
               onOpenFontSettings: () => _pendingFeedFontScale = true,
@@ -848,8 +848,7 @@ class _DramaPageState extends ConsumerState<DramaPage>
             danmakuEnabled: _feedDanmakuEnabled,
             onToggleDanmaku: () => unawaited(_toggleFeedDanmaku()),
             // 官方 `jm3.e`：弹幕设置入口在弹幕开关之后（与全页同门）。
-            onOpenDanmakuSettings: () =>
-                _pendingFeedDanmakuSettings = true,
+            onOpenDanmakuSettings: () => _pendingFeedDanmakuSettings = true,
             clearScreen: _feedClearScreen,
             onToggleClearScreen: () =>
                 setState(() => _feedClearScreen = !_feedClearScreen),
@@ -919,12 +918,12 @@ class _DramaPageState extends ConsumerState<DramaPage>
       await showModalBottomSheet<void>(
         context: context,
         useSafeArea: true,
-        backgroundColor: landscape ? Colors.transparent : const Color(0xFF1C1C1C),
+        backgroundColor: landscape
+            ? Colors.transparent
+            : const Color(0xFF1C1C1C),
         shape: landscape
             ? null
-            : RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
-              ),
+            : RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         builder: (sheetContext) {
           final panel = PlayletDanmakuSettingsPanel(
             settings: _feedDanmakuSettings,
@@ -933,9 +932,8 @@ class _DramaPageState extends ConsumerState<DramaPage>
               setState(() => _feedDanmakuSettings = settings);
               unawaited(DanmakuSettings.save(settings));
             },
-            onReset: () => messenger.showSnackBar(
-              const SnackBar(content: Text('设置成功')),
-            ),
+            onReset: () =>
+                messenger.showSnackBar(const SnackBar(content: Text('设置成功'))),
           );
           if (!landscape) return panel;
           return Container(
@@ -1183,127 +1181,135 @@ class _DramaPageState extends ConsumerState<DramaPage>
     // 只有推荐(16)等视频流频道是黑底竖滑播放。状态栏图标亮度跟着页面走。
     final isVideoFlow = channel.playsInline;
     final lightPage = !isVideoFlow;
-    return AnnotatedRegion<SystemUiOverlayStyle>(
-      value: lightPage ? SystemUiOverlayStyle.dark : SystemUiOverlayStyle.light,
-      child: Scaffold(
-        backgroundColor: lightPage ? Colors.white : Colors.black,
-        body: Stack(
-          children: [
-            Positioned.fill(
-              // 最近 and 收藏 are lists in the official client too: the recent
-              // list comes from the device's own history and the follow list
-              // from the account, so neither is a video feed here either.
-              // 看剧/漫剧是浅色海报瀑布格（官方 StaggeredFeedTab，
-              // `client_template` 12/13），只有推荐走全屏竖滑播放流。
-              child: switch (channel) {
-                DramaChannel(source: DramaChannelSource.feed, kind: 'manju') =>
-                  _browseGrid(
+    return DisplaySafeBackground(
+      color: lightPage ? Colors.white : Colors.black,
+      child: AnnotatedRegion<SystemUiOverlayStyle>(
+        value: lightPage
+            ? SystemUiOverlayStyle.dark
+            : SystemUiOverlayStyle.light,
+        child: Scaffold(
+          backgroundColor: lightPage ? Colors.white : Colors.black,
+          body: Stack(
+            children: [
+              Positioned.fill(
+                // 最近 and 收藏 are lists in the official client too: the recent
+                // list comes from the device's own history and the follow list
+                // from the account, so neither is a video feed here either.
+                // 看剧/漫剧是浅色海报瀑布格（官方 StaggeredFeedTab，
+                // `client_template` 12/13），只有推荐走全屏竖滑播放流。
+                child: switch (channel) {
+                  DramaChannel(
+                    source: DramaChannelSource.feed,
+                    kind: 'manju',
+                  ) =>
+                    _browseGrid(
+                      state,
+                      items,
+                      columns: 3,
+                      gridKey: 'drama_manju_grid',
+                      titleMaxLines: 1,
+                    ),
+                  DramaChannel(
+                    source: DramaChannelSource.feed,
+                    serverType: kChannelVideoEpisode,
+                  ) =>
+                    _browseGrid(
+                      state,
+                      items,
+                      columns: 2,
+                      gridKey: 'drama_episode_grid',
+                      titleMaxLines: 2,
+                    ),
+                  DramaChannel(source: DramaChannelSource.feed) => _feed(
                     state,
                     items,
-                    columns: 3,
-                    gridKey: 'drama_manju_grid',
-                    titleMaxLines: 1,
                   ),
-                DramaChannel(
-                  source: DramaChannelSource.feed,
-                  serverType: kChannelVideoEpisode,
-                ) =>
-                  _browseGrid(
-                    state,
-                    items,
-                    columns: 2,
-                    gridKey: 'drama_episode_grid',
-                    titleMaxLines: 2,
+                  _ => _LocalList(
+                    channel: channel,
+                    // 官方最近/收藏卡点击都直接进播放页续播，不经过详情页。
+                    onOpen: _openDetail,
+                    onPlay: _openPlayer,
+                    onFind: () => _selectChannel(0),
+                    onEditingChanged: (editing) {
+                      if (mounted) setState(() => _recentEditing = editing);
+                    },
                   ),
-                DramaChannel(source: DramaChannelSource.feed) => _feed(
-                  state,
-                  items,
-                ),
-                _ => _LocalList(
-                  channel: channel,
-                  // 官方最近/收藏卡点击都直接进播放页续播，不经过详情页。
-                  onOpen: _openDetail,
-                  onPlay: _openPlayer,
-                  onFind: () => _selectChannel(0),
-                  onEditingChanged: (editing) {
-                    if (mounted) setState(() => _recentEditing = editing);
-                  },
-                ),
-              },
-            ),
-            if (_pullDistance > 0)
-              Positioned(
-                top:
-                    MediaQuery.paddingOf(context).top +
-                    _searchRowHeight +
-                    _stripHeight +
-                    8,
-                left: 0,
-                right: 0,
-                child: _PullRefreshHint(
-                  armed: _pullDistance >= _pullRefreshTrigger,
-                ),
+                },
               ),
-            // 浅色页的顶栏背板：官方上滑时卡片从一条奶白渐变后面穿过，
-            // 搜索框/频道条不会和海报叠在一起（黑页保持透明压在视频上）。
-            // 最近频道进编辑后与官方一致：顶栏整个隐藏（`af()` gone）。
-            // 纯装饰背板必须放行点击——chips 行官方就落在它的淡出带里。
-            if (lightPage && !_recentEditing)
-              Positioned(
-                top: 0,
-                left: 0,
-                right: 0,
-                child: IgnorePointer(
-                  child: SizedBox(
-                    height:
-                        MediaQuery.paddingOf(context).top +
-                        _searchRowHeight +
-                        _stripHeight +
-                        56,
-                    child: const DecoratedBox(
-                      decoration: BoxDecoration(
-                        gradient: LinearGradient(
-                          begin: Alignment.topCenter,
-                          end: Alignment.bottomCenter,
-                          colors: [
-                            Color(0xFFFFF3E6),
-                            Color(0xFFFFFFFF),
-                            Color(0x00FFFFFF),
-                          ],
-                          stops: [0.0, 0.5, 1.0],
+              if (_pullDistance > 0)
+                Positioned(
+                  top:
+                      MediaQuery.paddingOf(context).top +
+                      _searchRowHeight +
+                      _stripHeight +
+                      8,
+                  left: 0,
+                  right: 0,
+                  child: _PullRefreshHint(
+                    armed: _pullDistance >= _pullRefreshTrigger,
+                  ),
+                ),
+              // 浅色页的顶栏背板：官方上滑时卡片从一条奶白渐变后面穿过，
+              // 搜索框/频道条不会和海报叠在一起（黑页保持透明压在视频上）。
+              // 最近频道进编辑后与官方一致：顶栏整个隐藏（`af()` gone）。
+              // 纯装饰背板必须放行点击——chips 行官方就落在它的淡出带里。
+              if (lightPage && !_recentEditing)
+                Positioned(
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  child: IgnorePointer(
+                    child: SizedBox(
+                      height:
+                          MediaQuery.paddingOf(context).top +
+                          _searchRowHeight +
+                          _stripHeight +
+                          56,
+                      child: const DecoratedBox(
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                            colors: [
+                              Color(0xFFFFF3E6),
+                              Color(0xFFFFFFFF),
+                              Color(0x00FFFFFF),
+                            ],
+                            stops: [0.0, 0.5, 1.0],
+                          ),
                         ),
                       ),
                     ),
                   ),
                 ),
-              ),
-            if (!_recentEditing)
-              Positioned(
-                top: 0,
-                left: 0,
-                right: 0,
-                child: _TopBar(
-                  channels: _channels,
-                  selected: _channel,
-                  onSelect: _selectChannel,
-                  onSearch: _openSearch,
-                  // 官方浅色页（看剧/漫剧）的顶栏换浅肤：深色字 + 浅灰搜索框。
-                  light: lightPage,
+              if (!_recentEditing)
+                Positioned(
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  child: _TopBar(
+                    channels: _channels,
+                    selected: _channel,
+                    onSelect: _selectChannel,
+                    onSearch: _openSearch,
+                    // 官方浅色页（看剧/漫剧）的顶栏换浅肤：深色字 + 浅灰搜索框。
+                    light: lightPage,
+                  ),
                 ),
-              ),
-            // 「上滑查看更多视频」：官方挂在全屏容器上、`gravity=bottom|center`
-            // + bottomMargin 94dp（`pp3.f.n()`）。注意官方主界面（`d5.xml`）的
-            // 底部 tab（50dp）是**悬浮压在 feed 上的**，所以 94dp 从 tab 底边算，
-            // 提示悬在 tab 栏上方约 44dp。本页 feed 止步于 NavigationBar 顶边，
-            // 同一视觉位置 = 94 - 官方 tab 高 50 = **44dp**。
-            if (_guideMounted)
-              Positioned(
-                left: 16,
-                right: 16,
-                bottom: _effectiveBottomInset(context) + 16,
-                child: _SwipeUpHint(visible: _guideVisible),
-              ),
-          ],
+              // 「上滑查看更多视频」：官方挂在全屏容器上、`gravity=bottom|center`
+              // + bottomMargin 94dp（`pp3.f.n()`）。注意官方主界面（`d5.xml`）的
+              // 底部 tab（50dp）是**悬浮压在 feed 上的**，所以 94dp 从 tab 底边算，
+              // 提示悬在 tab 栏上方约 44dp。本页 feed 止步于 NavigationBar 顶边，
+              // 同一视觉位置 = 94 - 官方 tab 高 50 = **44dp**。
+              if (_guideMounted)
+                Positioned(
+                  left: 16,
+                  right: 16,
+                  bottom: _effectiveBottomInset(context) + 16,
+                  child: _SwipeUpHint(visible: _guideVisible),
+                ),
+            ],
+          ),
         ),
       ),
     );
@@ -1613,9 +1619,7 @@ class _DramaPageState extends ConsumerState<DramaPage>
   }
 
   void _openDetail(MediaItem item) {
-    unawaited(
-      _pushOverFeed(() => openBookDetail(context, item)),
-    );
+    unawaited(_pushOverFeed(() => openBookDetail(context, item)));
   }
 
   /// feed 卡片标题行「剧名 >」→ 剧集详情页（官方 `ql3/v0.a1()` 默认分支，

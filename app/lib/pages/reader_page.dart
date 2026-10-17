@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
 
 import '../models/book_comment.dart';
+import '../platform/display_safe_area.dart';
 import '../models/chapter_ideas.dart';
 import '../models/media_item.dart';
 import '../services/api_client.dart';
@@ -772,8 +773,10 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
     final chapterId = _chapter.itemId;
     final loadGeneration = _loadGeneration;
     final existing = _rangeUnderlines
-        .where((underline) => underline.coversExactly(selection.start,
-            selection.end))
+        .where(
+          (underline) =>
+              underline.coversExactly(selection.start, selection.end),
+        )
         .toList();
     if (!add && existing.isEmpty) return;
     final record = ReaderRangeUnderline(
@@ -881,9 +884,7 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
     List<ReaderRangeUnderline> ranges;
     try {
       final saved = await store.load(widget.bookId, chapterId);
-      ids = {
-        for (final entry in saved.values) entry.id,
-      };
+      ids = {for (final entry in saved.values) entry.id};
       ranges = await store.loadRanges(widget.bookId, chapterId);
     } catch (_) {
       ids = const {};
@@ -1928,10 +1929,9 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
           paragraphAnchored &&
           !_chapterContent.timelineChecked) {
         _showMessage('正在获取本段音频…');
-        await _refreshCachedChapter(chapter).timeout(
-          const Duration(seconds: 12),
-          onTimeout: () {},
-        );
+        await _refreshCachedChapter(
+          chapter,
+        ).timeout(const Duration(seconds: 12), onTimeout: () {});
         // The user may have turned the page while the timeline was in flight.
         // Serving another chapter's paragraph position would start playback at
         // a place nobody asked for.
@@ -2030,7 +2030,12 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
     );
   }
 
-  Widget _buildReader(BuildContext context) {
+  Widget _buildReader(BuildContext context) => DisplaySafeBackground(
+    color: _effectivePreset.backgroundColor,
+    child: _buildReaderPage(context),
+  );
+
+  Widget _buildReaderPage(BuildContext context) {
     final preset = _effectivePreset;
     final windowPadding = MediaQuery.paddingOf(context);
     final overlayStyle = preset.isDark
@@ -2219,10 +2224,7 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
             IconButton(
               tooltip: '收起阅读菜单',
               onPressed: _toggleControls,
-              icon: Icon(
-                LucideIcons.chevron_up,
-                color: preset.textColor,
-              ),
+              icon: Icon(LucideIcons.chevron_up, color: preset.textColor),
             ),
           ],
         ),
@@ -2416,7 +2418,11 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
     final origin = overlayBox.globalToLocal(
       entry.box.localToGlobal(Offset(caret.x, caret.top)),
     );
-    return (x: origin.dx, top: origin.dy, bottom: origin.dy + caret.bottom - caret.top);
+    return (
+      x: origin.dx,
+      top: origin.dy,
+      bottom: origin.dy + caret.bottom - caret.top,
+    );
   }
 
   /// [offset] (chapter space) resolved into [block]'s text space, snapping a
@@ -2468,9 +2474,7 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
     // A drag can land a bound on the '\n' separator between two blocks; such
     // a range paints nothing, so grow it onto the next real character — the
     // finger must never hold an invisible selection.
-    if (next.isValid &&
-        next.end < range.$2 &&
-        _selectionPaintsNothing(next)) {
+    if (next.isValid && next.end < range.$2 && _selectionPaintsNothing(next)) {
       next = next.copyWith(end: next.end + 1);
     }
     if (next == selection) return;
@@ -2969,13 +2973,13 @@ class _ChapterDirectorySheetState extends State<_ChapterDirectorySheet> {
                             if (widget.cachedIds.contains(chapter.itemId))
                               const Tooltip(
                                 message: '已缓存',
-                                child: Icon(
-                                  LucideIcons.circle_check,
-                                  size: 18,
-                                ),
+                                child: Icon(LucideIcons.circle_check, size: 18),
                               ),
                             if (current)
-                              Icon(LucideIcons.locate_fixed, color: scheme.primary),
+                              Icon(
+                                LucideIcons.locate_fixed,
+                                color: scheme.primary,
+                              ),
                           ],
                         ),
                       ),

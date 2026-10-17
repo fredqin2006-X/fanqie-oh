@@ -35,6 +35,7 @@ import 'services/shelf_store.dart';
 import 'services/swipe_guide_store.dart';
 import 'widgets/lazy_indexed_stack.dart';
 import 'widgets/home/home_design.dart';
+import 'platform/display_safe_area.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -144,6 +145,13 @@ class FqApp extends StatefulWidget {
 
 class _FqAppState extends State<FqApp> {
   final _navigatorKey = GlobalKey<NavigatorState>();
+  final _displaySafeArea = DisplaySafeAreaController();
+
+  @override
+  void dispose() {
+    _displaySafeArea.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -157,9 +165,13 @@ class _FqAppState extends State<FqApp> {
             final effectiveMode = eink ? ThemeMode.light : mode;
             return MaterialApp(
               navigatorKey: _navigatorKey,
-              builder: (context, child) => AudioPlaybackScope(
-                navigatorKey: _navigatorKey,
-                child: child ?? const SizedBox.shrink(),
+              navigatorObservers: [_displaySafeArea],
+              builder: (context, child) => DisplaySafeArea(
+                controller: _displaySafeArea,
+                child: AudioPlaybackScope(
+                  navigatorKey: _navigatorKey,
+                  child: child ?? const SizedBox.shrink(),
+                ),
               ),
               title: 'fqapp',
               debugShowCheckedModeBanner: false,
@@ -363,9 +375,7 @@ class _RootShellState extends State<RootShell> {
         shadowColor: Colors.transparent,
         indicatorColor: eink
             ? Colors.black
-            : HomePalette.accent.withValues(
-                alpha: glassDark ? 0.20 : 0.12,
-              ),
+            : HomePalette.accent.withValues(alpha: glassDark ? 0.20 : 0.12),
         indicatorShape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(16),
         ),
@@ -373,9 +383,7 @@ class _RootShellState extends State<RootShell> {
           (states) => IconThemeData(
             size: 22,
             color: states.contains(WidgetState.selected)
-                ? (eink
-                      ? Colors.white
-                      : HomePalette.accent)
+                ? (eink ? Colors.white : HomePalette.accent)
                 : (eink
                       ? Colors.black
                       : (glassDark
@@ -392,9 +400,7 @@ class _RootShellState extends State<RootShell> {
             color: states.contains(WidgetState.selected)
                 ? (eink
                       ? Colors.black
-                      : (glassDark
-                            ? HomePalette.accent
-                            : palette.accentText))
+                      : (glassDark ? HomePalette.accent : palette.accentText))
                 : (eink
                       ? Colors.black
                       : (glassDark
@@ -495,10 +501,7 @@ class _RootShellState extends State<RootShell> {
                         decoration: BoxDecoration(
                           color: Colors.white,
                           borderRadius: BorderRadius.circular(28),
-                          border: Border.all(
-                            color: Colors.black,
-                            width: 0.8,
-                          ),
+                          border: Border.all(color: Colors.black, width: 0.8),
                         ),
                         child: navBar,
                       )
@@ -507,7 +510,9 @@ class _RootShellState extends State<RootShell> {
                         child: Container(
                           decoration: BoxDecoration(
                             color: glassDark
-                                ? const Color(0xFF161619).withValues(alpha: 0.72)
+                                ? const Color(
+                                    0xFF161619,
+                                  ).withValues(alpha: 0.72)
                                 : Colors.white.withValues(alpha: 0.82),
                             borderRadius: BorderRadius.circular(28),
                             border: Border.all(

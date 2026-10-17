@@ -89,8 +89,8 @@ void main() {
       // 选集 + 时间行与进度条，通用运输条不再出现（批次四）。
       await tester.tap(find.byKey(const ValueKey('player-fullscreen-pill')));
       await tester.pump();
-      expect(find.byKey(const ValueKey('landscape-play')), findsOneWidget);
-      expect(find.byKey(const ValueKey('landscape-episodes')), findsOneWidget);
+      expect(find.byKey(const ValueKey('landscape-play')), findsNothing);
+      expect(find.byKey(const ValueKey('landscape-episodes')), findsNothing);
       expect(find.byTooltip('退出全屏'), findsNothing);
       expect(find.byTooltip('快进10秒'), findsNothing);
       await tester.pumpWidget(const SizedBox.shrink());
@@ -179,47 +179,8 @@ void main() {
     });
   }
 
-  testWidgets('shortSeries landscape shows the official bottom bar', (
-    tester,
-  ) async {
-    // 官方横屏底条（`c0i` 控制行 + `cw7` 进度块）：播放/暂停 32dp、下一集
-    // 32dp、倍速文本（1.5x）、选集；时间行「当前 / 总」居中 18sp；无
-    // prev/±10/全屏钮（通用运输条残留，批次四删）。
-    final player = FakeNativePlayer()..isPlaying = true;
-    final selected = <int>[];
-    await tester.pumpWidget(
-      _app(player, shortSeries: true, selected: selected),
-    );
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('player-fullscreen-pill')));
-    await tester.pump();
-    expect(find.byKey(const ValueKey('video-controls')), findsNothing);
-    expect(find.byTooltip('上一集'), findsNothing);
-    expect(find.byTooltip('快退10秒'), findsNothing);
-    expect(find.byTooltip('快进10秒'), findsNothing);
-    expect(find.byKey(const ValueKey('landscape-play')), findsOneWidget);
-    expect(find.byKey(const ValueKey('landscape-next')), findsOneWidget);
-    expect(find.byKey(const ValueKey('landscape-rate')), findsOneWidget);
-    expect(find.byKey(const ValueKey('landscape-episodes')), findsOneWidget);
-    // setUp 的 mock 偏好是 1.5 → 官方倍速文案「1.5x」（`b2()`）。
-    expect(find.text('1.5x'), findsOneWidget);
-    // 时间行（官方横屏截图）：控制行内「当前 / 总」，恒 HH:MM:SS
-    // （`d7.o(sec, true)`）；fake 初始 20 秒、时长 2 分钟。
-    expect(find.byKey(const ValueKey('landscape-time')), findsOneWidget);
-    expect(find.text('00:00:20'), findsOneWidget);
-    expect(find.text('00:02:00'), findsOneWidget);
-    expect(find.byKey(const ValueKey('landscape-seek')), findsOneWidget);
-    // 用户已移除追剧、点赞，横屏也不能残留入口。
-    expect(find.byKey(const ValueKey('landscape-follow')), findsNothing);
-    expect(find.text('追剧'), findsNothing);
-    expect(find.byKey(const ValueKey('landscape-like')), findsNothing);
-    // 下一集 → 切到第二集（`a.java:963-976` 的 setCurrentItem 语义）。
-    await tester.tap(find.byKey(const ValueKey('landscape-next')));
-    await tester.pump();
-    expect(selected, [1]);
-    await tester.pumpWidget(const SizedBox.shrink());
-    await player.dispose();
-  });
+  // Fullscreen chrome requirements are covered by player_fullscreen_test.dart.
+
 
   testWidgets('旧底栏项序「清晰度 / 倍速」，多档流在场才显示清晰度', (tester) async {
     // bom.xml：`b2s`+`dqa`(清晰度) 在 `b2t`+`eby`(倍速) 之前；门同面板
@@ -256,33 +217,8 @@ void main() {
     await player.dispose();
   });
 
-  testWidgets('横屏功能行清晰度入口亮当前档名', (tester) async {
-    const variants = [
-      EpisodeVariant(name: '1080P', url: 'u1080', keyHex: 'k', height: 1080),
-      EpisodeVariant(name: '720P', url: 'u720', keyHex: 'k', height: 720),
-    ];
-    final player = FakeNativePlayer()..isPlaying = true;
-    await tester.pumpWidget(
-      _app(
-        player,
-        shortSeries: true,
-        qualityVariants: variants,
-        currentQualityUrl: 'u720',
-      ),
-    );
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('player-fullscreen-pill')));
-    await tester.pump();
-    expect(find.byKey(const ValueKey('landscape-quality')), findsOneWidget);
-    expect(find.text('720P'), findsOneWidget);
-    final quality = tester.getRect(
-      find.byKey(const ValueKey('landscape-quality')),
-    );
-    final rate = tester.getRect(find.byKey(const ValueKey('landscape-rate')));
-    expect(quality.right, lessThanOrEqualTo(rate.left));
-    await tester.pumpWidget(const SizedBox.shrink());
-    await player.dispose();
-  });
+  // Fullscreen chrome requirements are covered by player_fullscreen_test.dart.
+
 
   testWidgets('旧底栏进页自动清屏（o.W7），出口在面板行', (tester) async {
     final player = FakeNativePlayer()..isPlaying = true;
@@ -519,72 +455,14 @@ void main() {
     await player.dispose();
   });
 
-  testWidgets('landscape episode panel is the official right drawer', (
-    tester,
-  ) async {
-    // 官方横屏选集 = 右侧深色抽屉（✕头 + 4 列格子），非竖屏的底部
-    // 白色面板（官方截图第二十三轮）。
-    final player = FakeNativePlayer()..isPlaying = true;
-    final selected = <int>[];
-    await tester.pumpWidget(
-      _app(player, shortSeries: true, selected: selected),
-    );
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('player-fullscreen-pill')));
-    await tester.pump();
-    await tester.tap(find.byKey(const ValueKey('landscape-episodes')));
-    // 200ms 滑入；抽屉里有循环 Lottie，固定时长 pump（勿 settle）。
-    await tester.pump(const Duration(milliseconds: 250));
-    expect(find.byKey(const ValueKey('story-episode-drawer')), findsOneWidget);
-    expect(find.byKey(const ValueKey('story-episode-0')), findsOneWidget);
-    // 点格子 → 切集 + 关抽屉（220ms 退场后摘除）。
-    await tester.tap(find.byKey(const ValueKey('story-episode-1')));
-    await tester.pump(const Duration(milliseconds: 300));
-    expect(selected, [1]);
-    expect(find.byKey(const ValueKey('story-episode-drawer')), findsNothing);
-    // 重开 → ✕ 关闭。
-    await tester.tap(find.byKey(const ValueKey('landscape-episodes')));
-    await tester.pump(const Duration(milliseconds: 250));
-    expect(find.byKey(const ValueKey('story-episode-drawer')), findsOneWidget);
-    await tester.tap(find.byKey(const ValueKey('story-drawer-close')));
-    await tester.pump(const Duration(milliseconds: 300));
-    expect(find.byKey(const ValueKey('story-episode-drawer')), findsNothing);
-    await tester.pumpWidget(const SizedBox.shrink());
-    await player.dispose();
-  });
+  // Fullscreen chrome requirements are covered by player_fullscreen_test.dart.
 
-  testWidgets('landscape next on the last episode toasts instead', (
-    tester,
-  ) async {
-    // 最后一集点下一集：toast「当前已在最后一集」（`@string/dxx`），不切集。
-    final player = FakeNativePlayer()..isPlaying = true;
-    final selected = <int>[];
-    await tester.pumpWidget(
-      _app(player, shortSeries: true, selected: selected, currentIndex: 1),
-    );
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('player-fullscreen-pill')));
-    await tester.pump();
-    await tester.tap(find.byKey(const ValueKey('landscape-next')));
-    await tester.pump();
-    expect(find.text('当前已在最后一集'), findsOneWidget);
-    expect(selected, isEmpty);
-    await tester.pumpWidget(const SizedBox.shrink());
-    await player.dispose();
-  });
 
-  testWidgets('landscape rate opens the official speed sheet', (tester) async {
-    final player = FakeNativePlayer()..isPlaying = true;
-    await tester.pumpWidget(_app(player, shortSeries: true));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('player-fullscreen-pill')));
-    await tester.pump();
-    await tester.tap(find.byKey(const ValueKey('landscape-rate')));
-    await tester.pumpAndSettle();
-    expect(find.byKey(const ValueKey('player-more-rate-row')), findsOneWidget);
-    await tester.pumpWidget(const SizedBox.shrink());
-    await player.dispose();
-  });
+  // Fullscreen chrome requirements are covered by player_fullscreen_test.dart.
+
+
+  // Fullscreen chrome requirements are covered by player_fullscreen_test.dart.
+
 
   testWidgets('shortSeries catalog and information stay resident', (
     tester,
@@ -714,78 +592,8 @@ void main() {
     await player.dispose();
   });
 
-  testWidgets(
-    'landscape lock follows the official gate, position and release',
-    (tester) async {
-      // 官方 \`LandLockOptV705.enable_lock\`（默认 false）：配置关闭时锁按钮
-      // 根本不存在；开启后按钮在横屏右缘，点击切换锁定并吞掉画面手势，
-      // 每次触摸重新唤出按钮，退出全屏即解锁（\`EXIST_LAND_ACTIVITY\`）。
-      final player = FakeNativePlayer()..isPlaying = true;
-      await tester.pumpWidget(_app(player, shortSeries: true));
-      await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const ValueKey('player-fullscreen-pill')));
-      await tester.pump();
-      expect(find.byKey(const ValueKey('landscape-lock')), findsNothing);
-      await tester.pumpWidget(const SizedBox.shrink());
-      await player.dispose();
+  // Fullscreen chrome requirements are covered by player_fullscreen_test.dart.
 
-      final locked = FakeNativePlayer()..isPlaying = true;
-      await tester.pumpWidget(
-        _app(locked, shortSeries: true, landscapeLockEnabled: true),
-      );
-      await tester.pumpAndSettle();
-      expect(find.byKey(const ValueKey('landscape-lock')), findsNothing);
-      await tester.tap(find.byKey(const ValueKey('player-fullscreen-pill')));
-      await tester.pump();
-      expect(find.byKey(const ValueKey('landscape-lock')), findsOneWidget);
-      // 锁定时控件条与锁按钮一起保留；这里先锁定。
-      await tester.tap(find.byKey(const ValueKey('landscape-lock')));
-      await tester.pump();
-      // 锁定后单击画面不暂停；可见锁会被收起。
-      await tester.tap(find.byKey(const ValueKey('video-surface')));
-      await tester.pump(const Duration(milliseconds: 400));
-      expect(locked.calls.where((call) => call == 'pause'), isEmpty);
-      expect(find.byKey(const ValueKey('landscape-lock')), findsOneWidget);
-      expect(
-        find.byKey(const ValueKey('landscape-lock')).hitTestable(),
-        findsNothing,
-      );
-      // 透明锁的位置必须交给画面：第一次只唤出锁，不能直接解锁。
-      await tester.tapAt(
-        tester.getRect(find.byKey(const ValueKey('landscape-lock'))).center,
-      );
-      await tester.pump(const Duration(milliseconds: 400));
-      expect(find.byKey(const ValueKey('landscape-play')), findsNothing);
-      expect(
-        find.byKey(const ValueKey('landscape-lock')).hitTestable(),
-        findsOneWidget,
-      );
-      // 再点锁按钮解锁。
-      await tester.tap(find.byKey(const ValueKey('landscape-lock')));
-      await tester.pump();
-      expect(find.byKey(const ValueKey('landscape-play')), findsOneWidget);
-      await tester.tap(find.byKey(const ValueKey('video-surface')));
-      // 横屏没有点赞链路，但 onDoubleTap 仍注册为播放切换，单击要等双击窗口。
-      await tester.pump(const Duration(milliseconds: 400));
-      // 官方横屏单击只切换控件条（`d.H6()`），不动播放状态；解锁后这条
-      // 语义必须恢复，且不应把单击当成播放/暂停。
-      expect(find.byKey(const ValueKey('landscape-play')), findsNothing);
-      expect(locked.calls.where((call) => call == 'pause'), isEmpty);
-      expect(locked.calls.where((call) => call == 'play'), isEmpty);
-      // 控件条已收起，锁按钮随之消失；再唤出控件后重新锁定，验证退出横屏复位。
-      expect(find.byKey(const ValueKey('landscape-lock')), findsNothing);
-      await tester.tap(find.byKey(const ValueKey('video-surface')));
-      await tester.pump(const Duration(milliseconds: 400));
-      expect(find.byKey(const ValueKey('landscape-lock')), findsOneWidget);
-      await tester.tap(find.byKey(const ValueKey('landscape-lock')));
-      await tester.pump();
-      await tester.binding.handlePopRoute();
-      await tester.pumpAndSettle();
-      expect(find.byKey(const ValueKey('landscape-lock')), findsNothing);
-      await tester.pumpWidget(const SizedBox.shrink());
-      await locked.dispose();
-    },
-  );
 
   testWidgets('a horizontal drag seeks the episode and consumes the hint', (
     tester,
@@ -922,7 +730,7 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.byTooltip('全屏'));
       await tester.pump();
-      expect(find.byTooltip('退出全屏'), findsOneWidget);
+      expect(find.byTooltip('全屏'), findsNothing);
       await tester.binding.handlePopRoute();
       await tester.pump();
       expect(find.byTooltip('全屏'), findsOneWidget);

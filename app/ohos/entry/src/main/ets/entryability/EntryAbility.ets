@@ -7,6 +7,7 @@ import { NativePlayerPlugin } from '../platform/NativePlayerPlugin';
 import { DocumentPlugin } from '../platform/DocumentPlugin';
 import { ReaderPlugin, WindowPolicy } from '../platform/ReaderPlugin';
 import { SystemTtsPlugin } from '../platform/SystemTtsPlugin';
+import { DisplayPlugin } from '../platform/DisplayPlugin';
 
 export default class EntryAbility extends FlutterAbility {
   configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -22,5 +23,6 @@ export default class EntryAbility extends FlutterAbility {
     plugins.add(new ReaderPlugin(this.context, documents, windowPolicy))
     plugins.add(new SystemTtsPlugin())
     plugins.add(new NativePlayerPlugin(this.context, windowPolicy))
+    plugins.add(new DisplayPlugin(this.context))
   }
 }

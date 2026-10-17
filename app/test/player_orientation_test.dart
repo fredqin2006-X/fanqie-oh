@@ -132,7 +132,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('全屏'));
     await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('退出全屏'));
+    await tester.binding.handlePopRoute();
     await tester.pumpAndSettle();
     // An empty list means "follow the device again".
     expect(orientations.last, isEmpty);

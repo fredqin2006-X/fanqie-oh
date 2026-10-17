@@ -107,7 +107,7 @@ void main() {
       expect(players.single.rate, 1.25);
       await tester.tap(find.byTooltip('全屏'));
       await tester.pumpAndSettle();
-      await tester.tap(find.byTooltip('下一集'));
+      players.first.completedEvents.add(true);
       await tester.pump();
       // Broadcast-stream cancellation may complete on the real event loop.
       await tester.runAsync(() => Future<void>.delayed(Duration.zero));
@@ -125,7 +125,10 @@ void main() {
       expect(players, hasLength(2));
       expect(players.last.isPlaying, true);
       expect(players.last.rate, 1.25);
-      expect(find.byTooltip('退出全屏'), findsOneWidget);
+      expect(find.byTooltip('全屏'), findsNothing);
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('全屏'), findsOneWidget);
       expect(store.entry?['episode'], 1);
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.runAsync(() => Future<void>.delayed(Duration.zero));

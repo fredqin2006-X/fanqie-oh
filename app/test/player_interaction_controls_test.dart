@@ -130,37 +130,28 @@ void main() {
     expect(find.text('第2集'), findsOneWidget);
   });
 
-  testWidgets('clear screen can pause and restore after window rotation', (
-    tester,
-  ) async {
+  testWidgets('fullscreen stays free of chrome after rotation and pause', (tester) async {
     final player = FakeNativePlayer()..isPlaying = true;
     await _mount(tester, player, shortSeries: true);
-    // 先进入全屏，再模拟系统送来的窗口尺寸变化，保留同一个 chrome 状态。
     await tester.tap(find.byKey(const ValueKey('player-fullscreen-pill')));
-    await tester.pump();
-    await tester.tap(find.byKey(const ValueKey('player-clear-screen')));
     await tester.pump();
     await tester.binding.setSurfaceSize(const Size(800, 450));
     await tester.pump();
-    _expectClearScreen();
+    expect(find.byKey(const ValueKey('player-clear-screen')), findsNothing);
+    expect(find.text('恢复'), findsNothing);
     await tester.tapAt(const Offset(400, 200));
     await tester.pump(const Duration(milliseconds: 350));
     expect(player.isPlaying, isFalse);
-    _expectClearScreen();
+    expect(find.byKey(const ValueKey('landscape-play')), findsNothing);
     await tester.tapAt(const Offset(400, 200));
     await tester.pump(const Duration(milliseconds: 350));
     expect(player.isPlaying, isTrue);
-
     await tester.binding.setSurfaceSize(const Size(400, 800));
     await tester.pump();
-    _expectClearScreen();
-    await tester.binding.setSurfaceSize(const Size(800, 450));
+    expect(find.byKey(const ValueKey('player-fullscreen-pill')), findsNothing);
+    await tester.binding.handlePopRoute();
     await tester.pump();
-    await tester.tap(find.text('恢复'));
-    await tester.pump();
-    expect(find.byKey(const ValueKey('landscape-play')), findsOneWidget);
-    expect(find.byKey(const ValueKey('landscape-seek')), findsOneWidget);
-    expect(find.byKey(const ValueKey('player-clear-screen')), findsNothing);
+    expect(find.byKey(const ValueKey('player-fullscreen-pill')), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -234,19 +225,13 @@ void main() {
     },
   );
 
-  testWidgets('playback controls fit large text in a short landscape window', (
-    tester,
-  ) async {
-    await _mount(
-      tester,
-      FakeNativePlayer()..isPlaying = true,
-      landscape: true,
-      textScale: 2.5,
-    );
+  testWidgets('fullscreen hides text controls even with large fonts', (tester) async {
+    await _mount(tester, FakeNativePlayer()..isPlaying = true,
+      landscape: true, textScale: 2.5);
     expect(tester.takeException(), isNull);
-    await tester.tap(find.byTooltip('更多'));
-    await tester.pumpAndSettle();
-    expect(tester.takeException(), isNull);
+    expect(find.byTooltip('更多'), findsNothing);
+    expect(find.byKey(const ValueKey('landscape-seek')), findsNothing);
+    expect(find.text('恢复'), findsNothing);
   });
 }
 

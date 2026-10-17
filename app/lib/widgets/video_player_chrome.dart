@@ -15,6 +15,7 @@ import '../services/playback_format.dart';
 import '../services/player_preferences.dart';
 import '../services/player_style_config.dart';
 import '../services/short_series_font_scale.dart';
+import '../platform/display_safe_area.dart';
 import '../models/playlet_comment.dart';
 import 'player/playlet_danmaku_layer.dart';
 import 'player/playlet_danmaku_settings.dart';
@@ -393,7 +394,9 @@ class _VideoPlayerChromeState extends State<VideoPlayerChrome>
     // 清屏态的对账：栏内入口消失（配置翻转）时退出清屏，除非面板行还在
     // ——官方旧底栏手机分支本来就没有栏内入口，出口只在面板行（jm3.a），
     // 只要它可用就不许制造没有出口的状态。
-    if (_clearScreen && !_clearScreenConfigured && !_clearScreenPanelAvailable) {
+    if (_clearScreen &&
+        !_clearScreenConfigured &&
+        !_clearScreenPanelAvailable) {
       _clearScreen = false;
       _visible = true;
       _scheduleHide();
@@ -653,8 +656,7 @@ class _VideoPlayerChromeState extends State<VideoPlayerChrome>
   /// `FuncReverseOfClearScreen.reverse`，与底栏样式无关）。旧底栏手机分支
   /// 栏内没有清屏入口，面板行就是官方给的全部出口。非短剧的通用面板不
   /// 消费这个回调，行本身只出现在短剧面板里。
-  bool get _clearScreenPanelAvailable =>
-      !widget.reverseClearScreen && !_locked;
+  bool get _clearScreenPanelAvailable => !widget.reverseClearScreen && !_locked;
 
   bool get _catalogStyle =>
       widget.shortSeries && (widget.newPlayerBottomStyle || widget.hasBanner);
@@ -928,9 +930,7 @@ class _VideoPlayerChromeState extends State<VideoPlayerChrome>
       backgroundColor: landscape ? Colors.transparent : const Color(0xFF1C1C1C),
       shape: landscape
           ? null
-          : RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
-            ),
+          : RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       builder: (sheetContext) {
         final panel = PlayletDanmakuSettingsPanel(
           settings: widget.danmakuSettings,
@@ -939,9 +939,8 @@ class _VideoPlayerChromeState extends State<VideoPlayerChrome>
             onSettings(settings);
             unawaited(DanmakuSettings.save(settings));
           },
-          onReset: () => messenger.showSnackBar(
-            const SnackBar(content: Text('设置成功')),
-          ),
+          onReset: () =>
+              messenger.showSnackBar(const SnackBar(content: Text('设置成功'))),
         );
         if (!landscape) return panel;
         return Container(
@@ -972,9 +971,12 @@ class _VideoPlayerChromeState extends State<VideoPlayerChrome>
     if (_overlayOpen || _panelOpen || _locked) return;
     setState(() => _modalOpen = true);
     // 选档即时刷新 chrome 树的文字缩放（弹层盖不住整页）。
-    await showPlayletFontScaleSheet(context, onSelected: () {
-      if (mounted) setState(() {});
-    });
+    await showPlayletFontScaleSheet(
+      context,
+      onSelected: () {
+        if (mounted) setState(() {});
+      },
+    );
     if (mounted) setState(() => _modalOpen = false);
     if (mounted) _scheduleHide();
   }
@@ -1072,115 +1074,119 @@ class _VideoPlayerChromeState extends State<VideoPlayerChrome>
                 onQualitySelected: widget.onQualitySelected,
               )
             : StatefulBuilder(
-              builder: (context, setSheetState) => SafeArea(
-                top: false,
-                // 面板会随大字体变高；矮窗口下必须可滚，否则 RenderFlex 溢出
-                // （官方面板本身就是 RecyclerView）。
-                child: SingleChildScrollView(
-                  padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        key: const ValueKey('player-more-rate-row'),
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Padding(
-                            padding: EdgeInsets.only(top: 10),
-                            child: Text(
-                              '倍速',
-                              style: TextStyle(
-                                fontSize: 14,
-                                color: Color(0xFF1B1B1B),
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 16),
-                          Expanded(
-                            child: Wrap(
-                              spacing: 8,
-                              runSpacing: 8,
-                              children: [
-                                for (final rate
-                                    in PlayerPreferences.playbackRates)
-                                  ChoiceChip(
-                                    label: Text(_rateChipLabel(rate)),
-                                    selected: rate == _rate,
-                                    shape: RoundedRectangleBorder(
-                                      borderRadius: BorderRadius.circular(8),
-                                    ),
-                                    onSelected: (_) =>
-                                        Navigator.pop(context, rate),
-                                  ),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
-                      // 官方更多面板第 5 行：弹幕开关（`oi3/k.java:554-568`，
-                      // SP `video_danmaku_switch_sp/key_enable_danmaku_by_user`）。
-                      // 只有宿主提供了开关回调时才出现。
-                      if (widget.onToggleDanmaku != null) ...[
-                        const SizedBox(height: 12),
+                builder: (context, setSheetState) => SafeArea(
+                  top: false,
+                  // 面板会随大字体变高；矮窗口下必须可滚，否则 RenderFlex 溢出
+                  // （官方面板本身就是 RecyclerView）。
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
                         Row(
-                          key: const ValueKey('player-more-danmaku-row'),
+                          key: const ValueKey('player-more-rate-row'),
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            const Text(
-                              '弹幕',
-                              style: TextStyle(
-                                fontSize: 14,
-                                color: Color(0xFF1B1B1B),
+                            const Padding(
+                              padding: EdgeInsets.only(top: 10),
+                              child: Text(
+                                '倍速',
+                                style: TextStyle(
+                                  fontSize: 14,
+                                  color: Color(0xFF1B1B1B),
+                                ),
                               ),
                             ),
-                            const Spacer(),
-                            Switch(
-                              key: const ValueKey('player-more-danmaku-switch'),
-                              value: sheetDanmaku,
-                              onChanged: widget.onToggleDanmaku == null
-                                  ? null
-                                  : (value) {
-                                      widget.onToggleDanmaku!.call();
-                                      setSheetState(() => sheetDanmaku = value);
-                                    },
+                            const SizedBox(width: 16),
+                            Expanded(
+                              child: Wrap(
+                                spacing: 8,
+                                runSpacing: 8,
+                                children: [
+                                  for (final rate
+                                      in PlayerPreferences.playbackRates)
+                                    ChoiceChip(
+                                      label: Text(_rateChipLabel(rate)),
+                                      selected: rate == _rate,
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(8),
+                                      ),
+                                      onSelected: (_) =>
+                                          Navigator.pop(context, rate),
+                                    ),
+                                ],
+                              ),
                             ),
                           ],
                         ),
+                        // 官方更多面板第 5 行：弹幕开关（`oi3/k.java:554-568`，
+                        // SP `video_danmaku_switch_sp/key_enable_danmaku_by_user`）。
+                        // 只有宿主提供了开关回调时才出现。
+                        if (widget.onToggleDanmaku != null) ...[
+                          const SizedBox(height: 12),
+                          Row(
+                            key: const ValueKey('player-more-danmaku-row'),
+                            children: [
+                              const Text(
+                                '弹幕',
+                                style: TextStyle(
+                                  fontSize: 14,
+                                  color: Color(0xFF1B1B1B),
+                                ),
+                              ),
+                              const Spacer(),
+                              Switch(
+                                key: const ValueKey(
+                                  'player-more-danmaku-switch',
+                                ),
+                                value: sheetDanmaku,
+                                onChanged: widget.onToggleDanmaku == null
+                                    ? null
+                                    : (value) {
+                                        widget.onToggleDanmaku!.call();
+                                        setSheetState(
+                                          () => sheetDanmaku = value,
+                                        );
+                                      },
+                              ),
+                            ],
+                          ),
+                        ],
+                        // 官方更多面板：默认静音行（`tm3.b`，只存在内存里）。
+                        if (widget.onDefaultMuteChanged != null) ...[
+                          const SizedBox(height: 12),
+                          _sheetSwitch(
+                            'player-more-mute-row',
+                            'player-more-mute-switch',
+                            '默认静音',
+                            sheetMute,
+                            onChanged: (value) {
+                              widget.onDefaultMuteChanged!.call(value);
+                              setSheetState(() => sheetMute = value);
+                            },
+                          ),
+                        ],
+                        // 官方更多面板：画面撑满行（SP `is_fill_screen`）。
+                        if (widget.onFillScreenChanged != null) ...[
+                          const SizedBox(height: 12),
+                          _sheetSwitch(
+                            'player-more-fill-row',
+                            'player-more-fill-switch',
+                            '画面撑满',
+                            sheetFill,
+                            onChanged: (value) {
+                              widget.onFillScreenChanged!.call(value);
+                              setSheetState(() => sheetFill = value);
+                            },
+                          ),
+                        ],
                       ],
-                      // 官方更多面板：默认静音行（`tm3.b`，只存在内存里）。
-                      if (widget.onDefaultMuteChanged != null) ...[
-                        const SizedBox(height: 12),
-                        _sheetSwitch(
-                          'player-more-mute-row',
-                          'player-more-mute-switch',
-                          '默认静音',
-                          sheetMute,
-                          onChanged: (value) {
-                            widget.onDefaultMuteChanged!.call(value);
-                            setSheetState(() => sheetMute = value);
-                          },
-                        ),
-                      ],
-                      // 官方更多面板：画面撑满行（SP `is_fill_screen`）。
-                      if (widget.onFillScreenChanged != null) ...[
-                        const SizedBox(height: 12),
-                        _sheetSwitch(
-                          'player-more-fill-row',
-                          'player-more-fill-switch',
-                          '画面撑满',
-                          sheetFill,
-                          onChanged: (value) {
-                            widget.onFillScreenChanged!.call(value);
-                            setSheetState(() => sheetFill = value);
-                          },
-                        ),
-                      ],
-                    ],
+                    ),
                   ),
                 ),
-              ),
-            );
-      }
+              );
+      },
     );
     if (!mounted) return;
     setState(() => _modalOpen = false);
@@ -1431,9 +1437,14 @@ class _VideoPlayerChromeState extends State<VideoPlayerChrome>
     _endBoost();
     _cancelSeek();
     _doubleTapGuard?.cancel();
+    if (!_fullScreen && _panelOpen) await _closePanel();
+    if (!mounted) return;
     // 官方在 Activity 退出横屏时无条件解锁（`EXIST_LAND_ACTIVITY`）。
     if (_fullScreen) _releaseLock();
-    setState(() => _fullScreen = !_fullScreen);
+    setState(() {
+      _fullScreen = !_fullScreen;
+      _visible = !_fullScreen;
+    });
     await _applySystemUi();
     if (mounted) {
       setState(() {});
@@ -1490,11 +1501,8 @@ class _VideoPlayerChromeState extends State<VideoPlayerChrome>
     final size = _playerVideoSize;
     if (size.width <= 0 || size.height <= 0) return null;
     return size.width > size.height
-        ? const [
-            DeviceOrientation.landscapeLeft,
-            DeviceOrientation.landscapeRight,
-          ]
-        : const [DeviceOrientation.portraitUp, DeviceOrientation.portraitDown];
+        ? const [DeviceOrientation.landscapeLeft]
+        : const [DeviceOrientation.portraitUp];
   }
 
   /// Applies the video's orientation once its size is known.
@@ -1526,16 +1534,22 @@ class _VideoPlayerChromeState extends State<VideoPlayerChrome>
   }
 
   @override
-  Widget build(BuildContext context) => AnnotatedRegion<SystemUiOverlayStyle>(
-    value: const SystemUiOverlayStyle(
-      statusBarColor: Colors.transparent,
-      statusBarIconBrightness: Brightness.light,
-      statusBarBrightness: Brightness.dark,
-      systemNavigationBarColor: Colors.black,
-      systemNavigationBarIconBrightness: Brightness.light,
-    ),
-    child: _buildChrome(context),
+  Widget build(BuildContext context) => DisplaySafeBackground(
+    color: Colors.black,
+    child: _buildVideoChrome(context),
   );
+
+  Widget _buildVideoChrome(BuildContext context) =>
+      AnnotatedRegion<SystemUiOverlayStyle>(
+        value: const SystemUiOverlayStyle(
+          statusBarColor: Colors.transparent,
+          statusBarIconBrightness: Brightness.light,
+          statusBarBrightness: Brightness.dark,
+          systemNavigationBarColor: Colors.black,
+          systemNavigationBarIconBrightness: Brightness.light,
+        ),
+        child: _buildChrome(context),
+      );
 
   Widget _buildChrome(BuildContext context) {
     // 官方字号档（`jk3/b`：标准 1.0/大号 1.15/超大号 1.3）作用在播放页
@@ -1547,530 +1561,486 @@ class _VideoPlayerChromeState extends State<VideoPlayerChrome>
       outerScaler.scale(14) * ShortSeriesFontScale.scale / 14,
     );
     return PopScope(
-    canPop: !_panelOpen && !_fullScreen,
-    onPopInvokedWithResult: (didPop, result) {
-      if (!didPop && (_panelOpen || _fullScreen)) unawaited(_back());
-    },
-    child: MediaQuery(
-      data: MediaQuery.of(
-        context,
-      ).copyWith(textScaler: scaledScaler),
-      child: Scaffold(
-      backgroundColor: Colors.black,
-      body: LayoutBuilder(
-        builder: (context, constraints) {
-          final insets = MediaQuery.paddingOf(context);
-          final window = constraints.biggest;
-          _viewportSize = window;
-          final landscape = _fullScreen && window.width > window.height;
-          final layout = PlayerVideoLayout.calculate(
-            window: window,
-            insets: insets,
-            videoSize: _videoSize,
-            fit: VideoFit.contain,
-            panelFraction: _panelFraction,
-            restingPanelFraction: _panelRestFraction,
-            fullScreen: _fullScreen,
-          );
-          final durationMs = math.max(0, widget.duration.inMilliseconds);
-          final unobstructed = !_panelOpen && !_overlayOpen;
-          // 退出横屏运行时解锁：官方 Activity 销毁时用 EXIST_LAND_ACTIVITY
-          // 复位全局锁态，本地没有独立 Activity，只能在布局里对账。
-          if (_locked && !landscape) {
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              if (mounted && !_isLandscape) setState(_releaseLock);
-            });
-          }
-          // 锁定时官方整条控件/清屏链路被吞（fullscreen/d.H6() 与
-          // jq3/x.q 的 B4()/G6() 早退），只留锁按钮本身。
-          final showChrome = unobstructed && !_clearScreen && !_locked;
-          final controls = _visible && showChrome && !_seeking;
-          // 短剧竖屏双击点赞按用户要求移除；单击仍控制播放。
-          // 横屏单击切换控件，双击播放继续由横屏配置控制。
-          final portraitSeries = widget.shortSeries && !landscape;
-          final catalogStyle = _catalogStyle && !landscape;
-          final tapTogglesPlayback =
-              widget.shortSeries && (!landscape || _clearScreen);
-          final canPage =
-              unobstructed && !_seeking && !_boosting && !_locked && !landscape;
-          // 短剧横屏底条（批次四）：官方 `c0i.xml` + `cw7.xml` 的形态，
-          // 替换通用运输条在此朝向的全部残留（prev/±10/全屏钮）。
-          final landscapeBar = widget.shortSeries && landscape;
-          // 自动收起保留信息区，清屏则统一隐藏；计时器不是清屏状态来源。
-          final bandVisible =
-              widget.shortSeries &&
-              !landscape &&
-              _ready &&
-              !_visible &&
-              !_seeking &&
-              showChrome;
-          // 热评只在信息区可见时出现；新栏采用截图中的无底色信息行。
-          final hotBar =
-              widget.shortSeries &&
-              !_locked &&
-              !_clearScreen &&
-              !_seeking &&
-              widget.hotComments.isNotEmpty &&
-              (controls || bandVisible);
-          final showTextActions =
-              widget.shortSeries &&
-              unobstructed &&
-              !_locked &&
-              !_seeking &&
-              ((!landscape && !catalogStyle) || _clearScreen);
-          // 旧底栏清屏/还原只在 pad 配置开启时出现（`jj3/i.java:620-637`）。
-          // 手机旧栏项序「清晰度 / 倍速」（bom.xml），清晰度仅多档流在场。
-          return Stack(
-            fit: StackFit.expand,
-            children: [
-              GestureDetector(
-                key: const ValueKey('video-surface'),
-                behavior: HitTestBehavior.opaque,
-                // 官方 G6()：锁定后触摸只切换锁按钮的可见性。
-                onTap: () {
-                  if (!unobstructed) return;
-                  if (_locked) {
-                    _refreshLockVisibility();
-                  } else if (!(_doubleTapGuard?.isActive ?? false)) {
-                    tapTogglesPlayback ? _togglePlayback() : _toggleControls();
-                  }
-                },
-                onDoubleTapDown: (details) =>
-                    _doubleTapDownPosition = details.localPosition,
-                // Note: 官方短剧双击从不切播放，`video_landscape_style_609`
-                // 是点赞皮肤键（原挪用已删）— 见
-                // .agents/notes/implemented/bug-fix/2026-09-27-playlet-evidence-flips.md
-                onDoubleTap: () {
-                  if (!unobstructed) return;
-                  if (_locked) {
-                    _refreshLockVisibility();
-                  } else if (portraitSeries) {
-                    // 保留吞单击窗口，避免双击尾部的触摸误切播放状态。
-                    if (_ready && !_clearScreen) _guardDoubleTap();
-                  } else if (!widget.shortSeries) {
-                    _togglePlayback();
-                  } else {
-                    // 短剧横屏双击：中间三分之一切播放，左/右三分之一 ±10s。
-                    // 官方 jq3/x$q.onDoubleTap 只在中带隐藏控制条、从不切
-                    // 播放；实测反馈要求双击能暂停/快进快退，这里按通用
-                    // 播放器手势处理（竖屏分支保持原样：吞单击窗口）。
-                    _guardDoubleTap();
-                    final position = _doubleTapDownPosition;
-                    final width = window.width;
-                    if (_clearScreen || position == null || width <= 0) return;
-                    final third = width / 3;
-                    if (position.dx < third) {
-                      if (!_ready) return;
-                      if (widget.duration > Duration.zero) _seekBy(-10);
-                    } else if (position.dx > width - third) {
-                      if (!_ready) return;
-                      if (widget.duration > Duration.zero) _seekBy(10);
-                    } else {
-                      _togglePlayback();
-                    }
-                  }
-                },
-                onHorizontalDragStart: _startDragSeek,
-                onHorizontalDragUpdate: _updateDragSeek,
-                onHorizontalDragEnd: _endDragSeek,
-                // 官方长按分两支（jq3/x.java:2250-2252）：横向中心带
-                // （K6():2690-2711，竖屏 50%/横屏 33% 宽，Y 不限）命中且
-                // y7() 处理成功 → 打开「show_more_panel_from_long_click」
-                // 的更多面板；带外（或非短剧）才是倍速覆盖层。
-                onLongPressStart: (details) {
-                  if (_locked) {
-                    _refreshLockVisibility();
-                    return;
-                  }
-                  if (widget.shortSeries &&
-                      _inLongPressBand(details.localPosition.dx)) {
-                    if (!_seeking && !_paging) _showRates();
-                    return;
-                  }
-                  _startBoost();
-                },
-                onLongPressEnd: (_) => _endBoost(),
-                onLongPressCancel: _endBoost,
-                child: NotificationListener<ScrollNotification>(
-                  onNotification: (notification) {
-                    if (notification.depth != 0) return false;
-                    if (notification is ScrollStartNotification) {
-                      _paging = true;
-                      _hideTimer?.cancel();
-                      widget.onPagingChanged?.call(true);
-                    } else if (notification is ScrollEndNotification) {
-                      _paging = false;
-                      widget.onPagingChanged?.call(false);
-                      _scheduleHide();
-                    }
-                    return false;
-                  },
-                  child: PageView.builder(
-                    key: const ValueKey('episode-pager'),
-                    controller: _pages,
-                    scrollDirection: Axis.vertical,
-                    physics: canPage
-                        ? const ClampingScrollPhysics()
-                        : const NeverScrollableScrollPhysics(),
-                    itemCount: math.max(1, widget.episodes.length),
-                    onPageChanged: (index) => unawaited(_selectEpisode(index)),
-                    itemBuilder: (context, index) => Stack(
-                      key: ValueKey('episode-page-$index'),
-                      fit: StackFit.expand,
-                      children: [
-                        const ColoredBox(color: Colors.black),
-                        if (index == widget.currentIndex)
-                          _positionVideo(
-                            window: window,
-                            insets: insets,
-                            fitVideo: _ready,
-                            child: SizedBox(
-                              key: const ValueKey('video-frame'),
-                              child: widget.child,
-                            ),
-                          )
-                        else
-                          _positionVideo(
-                            window: window,
-                            insets: insets,
-                            child: PlayerCover(
-                              url: widget.coverUrl,
-                              label: widget.episodes[index].title,
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-              // 弹幕层：官方在竖屏画面内滚动，锁屏/清屏时隐藏
-              // （container/l.java 的渲染参数未取证，这里只放已证时间轴语义）。
-              if (widget.shortSeries &&
-                  widget.danmakuEnabled &&
+      canPop: !_panelOpen && !_fullScreen,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop && (_panelOpen || _fullScreen)) unawaited(_back());
+      },
+      child: MediaQuery(
+        data: MediaQuery.of(context).copyWith(textScaler: scaledScaler),
+        child: Scaffold(
+          backgroundColor: Colors.black,
+          body: LayoutBuilder(
+            builder: (context, constraints) {
+              final insets = MediaQuery.paddingOf(context);
+              final window = constraints.biggest;
+              _viewportSize = window;
+              final landscape = _fullScreen && window.width > window.height;
+              final layout = PlayerVideoLayout.calculate(
+                window: window,
+                insets: insets,
+                videoSize: _videoSize,
+                fit: VideoFit.contain,
+                panelFraction: _panelFraction,
+                restingPanelFraction: _panelRestFraction,
+                fullScreen: _fullScreen,
+              );
+              final durationMs = math.max(0, widget.duration.inMilliseconds);
+              final unobstructed = !_panelOpen && !_overlayOpen;
+              // 退出横屏运行时解锁：官方 Activity 销毁时用 EXIST_LAND_ACTIVITY
+              // 复位全局锁态，本地没有独立 Activity，只能在布局里对账。
+              if (_locked && !landscape) {
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (mounted && !_isLandscape) setState(_releaseLock);
+                });
+              }
+              // 锁定时官方整条控件/清屏链路被吞（fullscreen/d.H6() 与
+              // jq3/x.q 的 B4()/G6() 早退），只留锁按钮本身。
+              final showChrome =
+                  unobstructed && !_fullScreen && !_clearScreen && !_locked;
+              final controls = _visible && showChrome && !_seeking;
+              // 短剧竖屏双击点赞按用户要求移除；单击仍控制播放。
+              // 横屏单击切换控件，双击播放继续由横屏配置控制。
+              final portraitSeries = widget.shortSeries && !landscape;
+              final catalogStyle = _catalogStyle && !landscape;
+              final tapTogglesPlayback =
+                  widget.shortSeries && (!landscape || _clearScreen);
+              final canPage =
+                  unobstructed &&
+                  !_seeking &&
+                  !_boosting &&
+                  !_locked &&
+                  !landscape;
+              // 短剧横屏底条（批次四）：官方 `c0i.xml` + `cw7.xml` 的形态，
+              // 替换通用运输条在此朝向的全部残留（prev/±10/全屏钮）。
+              final landscapeBar = widget.shortSeries && landscape;
+              // 自动收起保留信息区，清屏则统一隐藏；计时器不是清屏状态来源。
+              final bandVisible =
+                  widget.shortSeries &&
+                  !landscape &&
+                  _ready &&
+                  !_visible &&
+                  !_seeking &&
+                  showChrome;
+              // 热评只在信息区可见时出现；新栏采用截图中的无底色信息行。
+              final hotBar =
+                  widget.shortSeries &&
+                  !_fullScreen &&
                   !_locked &&
                   !_clearScreen &&
-                  widget.danmaku.isNotEmpty)
-                Positioned.fill(
-                  child: SafeArea(
-                    bottom: false,
-                    child: KeyedSubtree(
-                      key: ObjectKey(widget.player),
-                      // 弹幕不受官方字号档影响（弹幕有自己的字号配置）：
-                      // 还原外层 textScaler。
-                      child: MediaQuery(
-                        data: MediaQuery.of(context).copyWith(
-                          textScaler: outerScaler,
-                        ),
-                        child: PlayletDanmakuLayer(
-                          key: const ValueKey('player-danmaku-layer'),
-                          entries: widget.danmaku,
-                          position: _position,
-                          rate: _boosting ? 2 : _rate,
-                          // 官方横屏飞行 12000ms、竖屏 10000ms。
-                          landscape: landscape,
-                          settings: widget.danmakuSettings,
-                          playing:
-                              _ready &&
-                              widget.playing &&
-                              !(widget.player?.buffering ?? false) &&
-                              _appActive &&
-                              !_seeking &&
-                              !_dragSeekActive,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              // 「左右滑动可调整进度」首次引导（`@string/cha`，距底 138dp，
-              // `o.java K6` 的引导层）。
-              if (widget.showSeekHint && showChrome && widget.enabled)
-                Positioned(
-                  left: 0,
-                  right: 0,
-                  bottom: insets.bottom + 138,
-                  child: IgnorePointer(
-                    child: Center(
-                      child: DecoratedBox(
-                        decoration: const BoxDecoration(
-                          color: Color(0xCC222222),
-                        ),
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 16,
-                            vertical: 12,
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: const [
-                              Icon(
-                                Icons.swap_horiz,
-                                size: 16,
-                                color: Colors.white,
-                              ),
-                              SizedBox(width: 4),
-                              Text(
-                                '左右滑动可调整进度',
-                                style: TextStyle(
-                                  fontSize: 14,
-                                  color: Colors.white,
+                  !_seeking &&
+                  widget.hotComments.isNotEmpty &&
+                  (controls || bandVisible);
+              final showTextActions =
+                  widget.shortSeries &&
+                  !_fullScreen &&
+                  unobstructed &&
+                  !_locked &&
+                  !_seeking &&
+                  ((!landscape && !catalogStyle) || _clearScreen);
+              // 旧底栏清屏/还原只在 pad 配置开启时出现（`jj3/i.java:620-637`）。
+              // 手机旧栏项序「清晰度 / 倍速」（bom.xml），清晰度仅多档流在场。
+              return Stack(
+                fit: StackFit.expand,
+                children: [
+                  GestureDetector(
+                    key: const ValueKey('video-surface'),
+                    behavior: HitTestBehavior.opaque,
+                    // 官方 G6()：锁定后触摸只切换锁按钮的可见性。
+                    onTap: () {
+                      if (!unobstructed) return;
+                      if (_locked) {
+                        _refreshLockVisibility();
+                      } else if (_fullScreen) {
+                        _togglePlayback();
+                      } else if (!(_doubleTapGuard?.isActive ?? false)) {
+                        tapTogglesPlayback
+                            ? _togglePlayback()
+                            : _toggleControls();
+                      }
+                    },
+                    onDoubleTapDown: (details) =>
+                        _doubleTapDownPosition = details.localPosition,
+                    // Note: 官方短剧双击从不切播放，`video_landscape_style_609`
+                    // 是点赞皮肤键（原挪用已删）— 见
+                    // .agents/notes/implemented/bug-fix/2026-09-27-playlet-evidence-flips.md
+                    onDoubleTap: () {
+                      if (!unobstructed) return;
+                      if (_locked) {
+                        _refreshLockVisibility();
+                      } else if (portraitSeries) {
+                        // 保留吞单击窗口，避免双击尾部的触摸误切播放状态。
+                        if (_ready && !_clearScreen) _guardDoubleTap();
+                      } else if (!widget.shortSeries) {
+                        _togglePlayback();
+                      } else {
+                        // 短剧横屏双击：中间三分之一切播放，左/右三分之一 ±10s。
+                        // 官方 jq3/x$q.onDoubleTap 只在中带隐藏控制条、从不切
+                        // 播放；实测反馈要求双击能暂停/快进快退，这里按通用
+                        // 播放器手势处理（竖屏分支保持原样：吞单击窗口）。
+                        _guardDoubleTap();
+                        final position = _doubleTapDownPosition;
+                        final width = window.width;
+                        if (_clearScreen || position == null || width <= 0) {
+                          return;
+                        }
+                        final third = width / 3;
+                        if (position.dx < third) {
+                          if (!_ready) return;
+                          if (widget.duration > Duration.zero) _seekBy(-10);
+                        } else if (position.dx > width - third) {
+                          if (!_ready) return;
+                          if (widget.duration > Duration.zero) _seekBy(10);
+                        } else {
+                          _togglePlayback();
+                        }
+                      }
+                    },
+                    onHorizontalDragStart: _startDragSeek,
+                    onHorizontalDragUpdate: _updateDragSeek,
+                    onHorizontalDragEnd: _endDragSeek,
+                    // 官方长按分两支（jq3/x.java:2250-2252）：横向中心带
+                    // （K6():2690-2711，竖屏 50%/横屏 33% 宽，Y 不限）命中且
+                    // y7() 处理成功 → 打开「show_more_panel_from_long_click」
+                    // 的更多面板；带外（或非短剧）才是倍速覆盖层。
+                    onLongPressStart: (details) {
+                      if (_locked) {
+                        _refreshLockVisibility();
+                        return;
+                      }
+                      if (!_fullScreen &&
+                          widget.shortSeries &&
+                          _inLongPressBand(details.localPosition.dx)) {
+                        if (!_seeking && !_paging) _showRates();
+                        return;
+                      }
+                      _startBoost();
+                    },
+                    onLongPressEnd: (_) => _endBoost(),
+                    onLongPressCancel: _endBoost,
+                    child: NotificationListener<ScrollNotification>(
+                      onNotification: (notification) {
+                        if (notification.depth != 0) return false;
+                        if (notification is ScrollStartNotification) {
+                          _paging = true;
+                          _hideTimer?.cancel();
+                          widget.onPagingChanged?.call(true);
+                        } else if (notification is ScrollEndNotification) {
+                          _paging = false;
+                          widget.onPagingChanged?.call(false);
+                          _scheduleHide();
+                        }
+                        return false;
+                      },
+                      child: PageView.builder(
+                        key: const ValueKey('episode-pager'),
+                        controller: _pages,
+                        scrollDirection: Axis.vertical,
+                        physics: canPage
+                            ? const ClampingScrollPhysics()
+                            : const NeverScrollableScrollPhysics(),
+                        itemCount: math.max(1, widget.episodes.length),
+                        onPageChanged: (index) =>
+                            unawaited(_selectEpisode(index)),
+                        itemBuilder: (context, index) => Stack(
+                          key: ValueKey('episode-page-$index'),
+                          fit: StackFit.expand,
+                          children: [
+                            const ColoredBox(color: Colors.black),
+                            if (index == widget.currentIndex)
+                              _positionVideo(
+                                window: window,
+                                insets: insets,
+                                fitVideo: _ready,
+                                child: SizedBox(
+                                  key: const ValueKey('video-frame'),
+                                  child: widget.child,
+                                ),
+                              )
+                            else
+                              _positionVideo(
+                                window: window,
+                                insets: insets,
+                                child: PlayerCover(
+                                  url: widget.coverUrl,
+                                  label: widget.episodes[index].title,
                                 ),
                               ),
-                            ],
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                  // Fullscreen retains enabled danmaku while hiding every other UI
+                  // layer, including the non-fullscreen clear-screen preference.
+                  if (widget.shortSeries &&
+                      widget.danmakuEnabled &&
+                      (_fullScreen || (!_locked && !_clearScreen)) &&
+                      widget.danmaku.isNotEmpty)
+                    Positioned.fill(
+                      child: SafeArea(
+                        bottom: false,
+                        child: KeyedSubtree(
+                          key: ObjectKey(widget.player),
+                          // 弹幕不受官方字号档影响（弹幕有自己的字号配置）：
+                          // 还原外层 textScaler。
+                          child: MediaQuery(
+                            data: MediaQuery.of(
+                              context,
+                            ).copyWith(textScaler: outerScaler),
+                            child: PlayletDanmakuLayer(
+                              key: const ValueKey('player-danmaku-layer'),
+                              entries: widget.danmaku,
+                              position: _position,
+                              rate: _boosting ? 2 : _rate,
+                              // 官方横屏飞行 12000ms、竖屏 10000ms。
+                              landscape: landscape,
+                              settings: widget.danmakuSettings,
+                              playing:
+                                  _ready &&
+                                  widget.playing &&
+                                  !(widget.player?.buffering ?? false) &&
+                                  _appActive &&
+                                  !_seeking &&
+                                  !_dragSeekActive,
+                            ),
                           ),
                         ),
                       ),
                     ),
-                  ),
-                ),
-              if (controls) ...[
-                _topBar(insets, landscape: landscape),
-                if (!landscape && !catalogStyle) _rightBar(insets),
-              ],
-              if (catalogStyle && (controls || bandVisible))
-                _portraitControls(
-                  insets: insets,
-                  videoBottom: layout.video.intersect(layout.viewport).bottom,
-                  controls: controls,
-                  hotBar: hotBar,
-                ),
-              // 信息层/选集胶囊压在进度条与画面之上，但必须保持transport在
-              // 其上方（Stack 后者在上）：通用播放器的运输条按钮不能被信息
-              // 层的渐变 Container 挡住点击。
-              if ((!catalogStyle && !landscape && (controls || bandVisible)) ||
-                  showTextActions)
-                Positioned(
-                  left: insets.left,
-                  right: insets.right,
-                  bottom:
-                      insets.bottom +
-                      (widget.shortSeries ? (landscape ? 16 : 56) : 96),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      if (!landscape && (controls || bandVisible))
-                        _information(showPill: controls, showBook: bandVisible),
-                      // 官方热评胶囊在信息面板下方（\`e0.java:2136-2161\` 的
-                      // "below_abstract" 位），只在有热评时出现。
-                      if (!landscape && hotBar)
-                        Padding(
-                          padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-                          child: PlayletHotCommentBar(
-                            comments: widget.hotComments,
-                            onTap: widget.onHotCommentTap,
-                            // 官方 sel&&vis：页面不可见或被弹层遮挡即停表。
-                            active:
-                                _appActive && !_overlayOpen && !_panelOpen,
+                  // 「左右滑动可调整进度」首次引导（`@string/cha`，距底 138dp，
+                  // `o.java K6` 的引导层）。
+                  if (widget.showSeekHint && showChrome && widget.enabled)
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      bottom: insets.bottom + 138,
+                      child: IgnorePointer(
+                        child: Center(
+                          child: DecoratedBox(
+                            decoration: const BoxDecoration(
+                              color: Color(0xCC222222),
+                            ),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 16,
+                                vertical: 12,
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: const [
+                                  Icon(
+                                    Icons.swap_horiz,
+                                    size: 16,
+                                    color: Colors.white,
+                                  ),
+                                  SizedBox(width: 4),
+                                  Text(
+                                    '左右滑动可调整进度',
+                                    style: TextStyle(
+                                      fontSize: 14,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
                           ),
                         ),
-                      // 标题/原著卡排在操作行上方，文字放大时也不占它的点击区。
-                      if (showTextActions)
-                        Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 4),
-                          child: Align(
-                            alignment: Alignment.centerRight,
-                            child: _screenTexts(),
+                      ),
+                    ),
+                  if (controls) ...[
+                    _topBar(insets, landscape: landscape),
+                    if (!landscape && !catalogStyle) _rightBar(insets),
+                  ],
+                  if (catalogStyle && (controls || bandVisible))
+                    _portraitControls(
+                      insets: insets,
+                      videoBottom: layout.video
+                          .intersect(layout.viewport)
+                          .bottom,
+                      controls: controls,
+                      hotBar: hotBar,
+                    ),
+                  // 信息层/选集胶囊压在进度条与画面之上，但必须保持transport在
+                  // 其上方（Stack 后者在上）：通用播放器的运输条按钮不能被信息
+                  // 层的渐变 Container 挡住点击。
+                  if ((!catalogStyle &&
+                          !landscape &&
+                          (controls || bandVisible)) ||
+                      showTextActions)
+                    Positioned(
+                      left: insets.left,
+                      right: insets.right,
+                      bottom:
+                          insets.bottom +
+                          (widget.shortSeries ? (landscape ? 16 : 56) : 96),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (!landscape && (controls || bandVisible))
+                            _information(
+                              showPill: controls,
+                              showBook: bandVisible,
+                            ),
+                          // 官方热评胶囊在信息面板下方（\`e0.java:2136-2161\` 的
+                          // "below_abstract" 位），只在有热评时出现。
+                          if (!landscape && hotBar)
+                            Padding(
+                              padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                              child: PlayletHotCommentBar(
+                                comments: widget.hotComments,
+                                onTap: widget.onHotCommentTap,
+                                // 官方 sel&&vis：页面不可见或被弹层遮挡即停表。
+                                active:
+                                    _appActive && !_overlayOpen && !_panelOpen,
+                              ),
+                            ),
+                          // 标题/原著卡排在操作行上方，文字放大时也不占它的点击区。
+                          if (showTextActions)
+                            Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 4,
+                              ),
+                              child: Align(
+                                alignment: Alignment.centerRight,
+                                child: _screenTexts(),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  if (!landscape && (controls || bandVisible))
+                    _catalogBar(insets, compact: catalogStyle),
+                  // 官方播放页（`apf.xml`）竖屏没有运输条；运输条只剩通用
+                  // 播放器（详情页影视）在用，短剧两个朝向都不走它。
+                  if (controls && _ready && !widget.shortSeries)
+                    _transport(insets, landscape),
+                  if (landscapeBar &&
+                      _ready &&
+                      showChrome &&
+                      (_visible || _seeking))
+                    _landscapeBar(insets),
+                  if ((_visible || _seeking || bandVisible) &&
+                      showChrome &&
+                      _ready &&
+                      !landscapeBar)
+                    Positioned(
+                      // Controls leave this Stack while seeking. Keep the outer
+                      // layer keyed so the active drag recognizer survives that
+                      // sibling change until the finger is released.
+                      key: const ValueKey('video-seek-layer'),
+                      left: insets.left + (catalogStyle ? 16 : 12),
+                      right: insets.right + (catalogStyle ? 16 : 12),
+                      // 新栏的 30dp 进度触区止于选集/清屏的 48dp 触区上沿。
+                      bottom:
+                          insets.bottom +
+                          (catalogStyle ? 60 : (widget.shortSeries ? 41 : 60)),
+                      child: RepaintBoundary(
+                        child: ListenableBuilder(
+                          listenable: _timeline,
+                          builder: (context, child) => StorySeekBar(
+                            key: const ValueKey('video-seek'),
+                            value: _progressValue,
+                            enabled: durationMs > 0,
+                            seeking: _seeking,
+                            onStart: _startSeek,
+                            onChanged: (value) => _seekValue.value = value,
+                            onEnd: (value) => unawaited(_finishSeek(value)),
+                            onCancel: _cancelSeek,
+                            trackWidth: catalogStyle ? 4 : 2,
+                            progressColor: widget.shortSeries
+                                ? const Color(0xFFFA6725)
+                                : Colors.white,
+                            trackColor: widget.shortSeries
+                                ? const Color(0x4DFFFFFF)
+                                : Colors.white24,
                           ),
                         ),
-                    ],
-                  ),
-                ),
-              if (!landscape && (controls || bandVisible))
-                _catalogBar(insets, compact: catalogStyle),
-              // 官方播放页（`apf.xml`）竖屏没有运输条；运输条只剩通用
-              // 播放器（详情页影视）在用，短剧两个朝向都不走它。
-              if (controls && _ready && !widget.shortSeries)
-                _transport(insets, landscape),
-              if (landscapeBar &&
-                  _ready &&
-                  showChrome &&
-                  (_visible || _seeking))
-                _landscapeBar(insets),
-              if ((_visible || _seeking || bandVisible) &&
-                  showChrome &&
-                  _ready &&
-                  !landscapeBar)
-                Positioned(
-                  // Controls leave this Stack while seeking. Keep the outer
-                  // layer keyed so the active drag recognizer survives that
-                  // sibling change until the finger is released.
-                  key: const ValueKey('video-seek-layer'),
-                  left: insets.left + (catalogStyle ? 16 : 12),
-                  right: insets.right + (catalogStyle ? 16 : 12),
-                  // 新栏的 30dp 进度触区止于选集/清屏的 48dp 触区上沿。
-                  bottom:
-                      insets.bottom +
-                      (catalogStyle ? 60 : (widget.shortSeries ? 41 : 60)),
-                  child: RepaintBoundary(
-                    child: ListenableBuilder(
-                      listenable: _timeline,
-                      builder: (context, child) => StorySeekBar(
-                        key: const ValueKey('video-seek'),
-                        value: _progressValue,
-                        enabled: durationMs > 0,
-                        seeking: _seeking,
-                        onStart: _startSeek,
-                        onChanged: (value) => _seekValue.value = value,
-                        onEnd: (value) => unawaited(_finishSeek(value)),
-                        onCancel: _cancelSeek,
-                        trackWidth: catalogStyle ? 4 : 2,
-                        progressColor: widget.shortSeries
-                            ? const Color(0xFFFA6725)
-                            : Colors.white,
-                        trackColor: widget.shortSeries
-                            ? const Color(0x4DFFFFFF)
-                            : Colors.white24,
                       ),
                     ),
-                  ),
-                ),
-              // 暂停态只留官方截图里的半透明大三角（第十七轮对齐）；原先
-              // 三角下的「00:00 / 05:03」时间文字是通用播放器遗产——官方
-              // 布局里没有任何暂停浮层的时间文字（`apktool/res/layout/cjc.xml`
-              // 只有铺满的进度/手势/空注入容器），已删（对照文档 §27）。
-              if (_ready &&
-                  !_playbackRequested &&
-                  showChrome &&
-                  _visible &&
-                  !_seeking)
-                Positioned.fromRect(
-                  rect: layout.viewport,
-                  child: IgnorePointer(
-                    child: Center(
-                      child: Icon(
-                        Icons.play_arrow_rounded,
-                        size: 86,
-                        color: Colors.white.withValues(alpha: .2),
-                      ),
-                    ),
-                  ),
-                ),
-              if (_seeking)
-                Center(
-                  child: IgnorePointer(
-                    child: ListenableBuilder(
-                      listenable: _timeline,
-                      builder: (context, child) => Text(
-                        '${_time(Duration(milliseconds: (durationMs * _progressValue).round()))} / ${_time(widget.duration)}',
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 24,
-                          shadows: [Shadow(blurRadius: 8)],
+                  // 暂停态只留官方截图里的半透明大三角（第十七轮对齐）；原先
+                  // 三角下的「00:00 / 05:03」时间文字是通用播放器遗产——官方
+                  // 布局里没有任何暂停浮层的时间文字（`apktool/res/layout/cjc.xml`
+                  // 只有铺满的进度/手势/空注入容器），已删（对照文档 §27）。
+                  if (_ready &&
+                      !_playbackRequested &&
+                      showChrome &&
+                      _visible &&
+                      !_seeking)
+                    Positioned.fromRect(
+                      rect: layout.viewport,
+                      child: IgnorePointer(
+                        child: Center(
+                          child: Icon(
+                            Icons.play_arrow_rounded,
+                            size: 86,
+                            color: Colors.white.withValues(alpha: .2),
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                ),
-              if (_boosting)
-                Positioned(
-                  top: insets.top + 56,
-                  left: 0,
-                  right: 0,
-                  child: const Center(
-                    child: IgnorePointer(child: Chip(label: Text('2× 加速中'))),
-                  ),
-                ),
-              if (_panelOpen && _panelDrawer) ...[
-                // 横屏右侧抽屉（官方截图第二十三轮）：200ms 滑入滑出 +
-                // 0.5 遮罩，点遮罩/✕/返回键关闭。
-                Positioned.fill(
-                  child: TweenAnimationBuilder<double>(
-                    tween: Tween(end: _panelDrawerClosing ? 0.0 : 1.0),
-                    duration: const Duration(milliseconds: 200),
-                    builder: (context, t, _) => GestureDetector(
-                      behavior: HitTestBehavior.opaque,
-                      onTap: () => unawaited(_closePanel()),
-                      child: ColoredBox(
-                        key: const ValueKey('story-panel-scrim'),
-                        color: Color.fromRGBO(0, 0, 0, 0.5 * t),
+                  if (_seeking && !_fullScreen)
+                    Center(
+                      child: IgnorePointer(
+                        child: ListenableBuilder(
+                          listenable: _timeline,
+                          builder: (context, child) => Text(
+                            '${_time(Duration(milliseconds: (durationMs * _progressValue).round()))} / ${_time(widget.duration)}',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 24,
+                              shadows: [Shadow(blurRadius: 8)],
+                            ),
+                          ),
+                        ),
                       ),
                     ),
-                  ),
-                ),
-                Positioned(
-                  top: 0,
-                  bottom: 0,
-                  right: 0,
-                  width: math.min(math.max(window.width * 0.34, 280), 420),
-                  child: TweenAnimationBuilder<double>(
-                    tween: Tween(end: _panelDrawerClosing ? 0.0 : 1.0),
-                    duration: const Duration(milliseconds: 200),
-                    curve: Curves.easeOutCubic,
-                    builder: (context, t, child) => FractionalTranslation(
-                      translation: Offset(1 - t, 0),
-                      child: Opacity(opacity: t, child: child!),
-                    ),
-                    child: StoryEpisodeDrawer(
-                      onOpenRelatedSeries: widget.onOpenRelatedSeries == null
-                          ? null
-                          : _openRelatedSeries,
-                      episodes: widget.episodes,
-                      currentIndex: widget.currentIndex,
-                      playingIndex:
-                          widget.playingIndex ??
-                          (_ready ? widget.currentIndex : null),
-                      playing: widget.playing,
-                      watched: widget.watchedEpisodes,
-                      onSelectEpisode: (index) {
-                        unawaited(_closePanel());
-                        unawaited(_selectEpisode(index));
-                      },
-                      onClose: () => unawaited(_closePanel()),
-                    ),
-                  ),
-                ),
-              ],
-              if (_panelOpen && !_panelDrawer) ...[
-                // 官方弹层遮罩：dim 0.5、随面板开合淡入淡出、点遮罩关闭
-                // （`AnimationBottomDialog.java:312-316,604`）。
-                Positioned.fill(
-                  child: ListenableBuilder(
-                    listenable: _panel,
-                    builder: (context, _) {
-                      final strength = _panelStrength;
-                      return GestureDetector(
-                        behavior: HitTestBehavior.opaque,
-                        onTap: () => unawaited(_animatePanel(0)),
-                        child: ColoredBox(
-                          key: const ValueKey('story-panel-scrim'),
-                          color: Color.fromRGBO(0, 0, 0, 0.5 * strength),
+                  if (_boosting && !_fullScreen)
+                    Positioned(
+                      top: insets.top + 56,
+                      left: 0,
+                      right: 0,
+                      child: const Center(
+                        child: IgnorePointer(
+                          child: Chip(label: Text('2× 加速中')),
                         ),
-                      );
-                    },
-                  ),
-                ),
-                Positioned(
-                  top: insets.top,
-                  left: insets.left,
-                  right: insets.right,
-                  bottom: 0,
-                  // 官方进出场 200ms 位移+淡入（`:268-337`）：位移由 sheet 的
-                  // extent 动画承担，透明度跟随同一进度。child 提升避免每个
-                  // extent tick 重建面板子树（渲染测试的 0-rebuild 断言）。
-                  child: NotificationListener<ScrollNotification>(
-                    onNotification: _onPanelScroll,
-                    child: ListenableBuilder(
-                      listenable: _panel,
-                      child: DraggableScrollableSheet(
-                        controller: _panel,
-                        initialChildSize: 0,
-                        minChildSize: 0,
-                        maxChildSize: _panelMaxFraction,
-                        snap: true,
-                        snapSizes: _panelSnapSizes,
-                        shouldCloseOnMinExtent: false,
-                        builder: (context, scroll) => StoryPlayerPanel(
-                          onOpenRelatedSeries: widget.onOpenRelatedSeries == null
+                      ),
+                    ),
+                  if (_panelOpen && _panelDrawer) ...[
+                    // 横屏右侧抽屉（官方截图第二十三轮）：200ms 滑入滑出 +
+                    // 0.5 遮罩，点遮罩/✕/返回键关闭。
+                    Positioned.fill(
+                      child: TweenAnimationBuilder<double>(
+                        tween: Tween(end: _panelDrawerClosing ? 0.0 : 1.0),
+                        duration: const Duration(milliseconds: 200),
+                        builder: (context, t, _) => GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: () => unawaited(_closePanel()),
+                          child: ColoredBox(
+                            key: const ValueKey('story-panel-scrim'),
+                            color: Color.fromRGBO(0, 0, 0, 0.5 * t),
+                          ),
+                        ),
+                      ),
+                    ),
+                    Positioned(
+                      top: 0,
+                      bottom: 0,
+                      right: 0,
+                      width: math.min(math.max(window.width * 0.34, 280), 420),
+                      child: TweenAnimationBuilder<double>(
+                        tween: Tween(end: _panelDrawerClosing ? 0.0 : 1.0),
+                        duration: const Duration(milliseconds: 200),
+                        curve: Curves.easeOutCubic,
+                        builder: (context, t, child) => FractionalTranslation(
+                          translation: Offset(1 - t, 0),
+                          child: Opacity(opacity: t, child: child!),
+                        ),
+                        child: StoryEpisodeDrawer(
+                          onOpenRelatedSeries:
+                              widget.onOpenRelatedSeries == null
                               ? null
                               : _openRelatedSeries,
-                          seriesTitle: widget.seriesTitle,
-                          seriesCover: widget.seriesCover,
-                          episodeLabel: widget.episodeLabel,
-                          // 选集面板头部箭头与播放页标题行同一路跳转
-                          // （官方详情入口）。
-                          onOpenSeries: widget.onOpenSeriesDetail,
-                          relateBook: widget.relateBook,
-                          onOpenRelateBook: widget.onOpenRelateBook,
-                          scrollController: scroll,
                           episodes: widget.episodes,
                           currentIndex: widget.currentIndex,
                           playingIndex:
@@ -2079,29 +2049,99 @@ class _VideoPlayerChromeState extends State<VideoPlayerChrome>
                           playing: widget.playing,
                           watched: widget.watchedEpisodes,
                           onSelectEpisode: (index) {
-                            unawaited(_animatePanel(0));
+                            unawaited(_closePanel());
                             unawaited(_selectEpisode(index));
                           },
-                          onDragStart: _startPanelDrag,
-                          onDragUpdate: (details) =>
-                              _dragPanel(details, layout.availableHeight),
-                          onDragEnd: _endPanelDrag,
-                          onDragCancel: () => _endPanelDrag(DragEndDetails()),
+                          onClose: () => unawaited(_closePanel()),
                         ),
                       ),
-                      builder: (context, child) =>
-                          Opacity(opacity: _panelStrength, child: child),
                     ),
-                  ),
-                ),
-              ],
-              _lockButton(window),
-            ],
-          );
-        },
+                  ],
+                  if (_panelOpen && !_panelDrawer) ...[
+                    // 官方弹层遮罩：dim 0.5、随面板开合淡入淡出、点遮罩关闭
+                    // （`AnimationBottomDialog.java:312-316,604`）。
+                    Positioned.fill(
+                      child: ListenableBuilder(
+                        listenable: _panel,
+                        builder: (context, _) {
+                          final strength = _panelStrength;
+                          return GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTap: () => unawaited(_animatePanel(0)),
+                            child: ColoredBox(
+                              key: const ValueKey('story-panel-scrim'),
+                              color: Color.fromRGBO(0, 0, 0, 0.5 * strength),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                    Positioned(
+                      top: insets.top,
+                      left: insets.left,
+                      right: insets.right,
+                      bottom: 0,
+                      // 官方进出场 200ms 位移+淡入（`:268-337`）：位移由 sheet 的
+                      // extent 动画承担，透明度跟随同一进度。child 提升避免每个
+                      // extent tick 重建面板子树（渲染测试的 0-rebuild 断言）。
+                      child: NotificationListener<ScrollNotification>(
+                        onNotification: _onPanelScroll,
+                        child: ListenableBuilder(
+                          listenable: _panel,
+                          child: DraggableScrollableSheet(
+                            controller: _panel,
+                            initialChildSize: 0,
+                            minChildSize: 0,
+                            maxChildSize: _panelMaxFraction,
+                            snap: true,
+                            snapSizes: _panelSnapSizes,
+                            shouldCloseOnMinExtent: false,
+                            builder: (context, scroll) => StoryPlayerPanel(
+                              onOpenRelatedSeries:
+                                  widget.onOpenRelatedSeries == null
+                                  ? null
+                                  : _openRelatedSeries,
+                              seriesTitle: widget.seriesTitle,
+                              seriesCover: widget.seriesCover,
+                              episodeLabel: widget.episodeLabel,
+                              // 选集面板头部箭头与播放页标题行同一路跳转
+                              // （官方详情入口）。
+                              onOpenSeries: widget.onOpenSeriesDetail,
+                              relateBook: widget.relateBook,
+                              onOpenRelateBook: widget.onOpenRelateBook,
+                              scrollController: scroll,
+                              episodes: widget.episodes,
+                              currentIndex: widget.currentIndex,
+                              playingIndex:
+                                  widget.playingIndex ??
+                                  (_ready ? widget.currentIndex : null),
+                              playing: widget.playing,
+                              watched: widget.watchedEpisodes,
+                              onSelectEpisode: (index) {
+                                unawaited(_animatePanel(0));
+                                unawaited(_selectEpisode(index));
+                              },
+                              onDragStart: _startPanelDrag,
+                              onDragUpdate: (details) =>
+                                  _dragPanel(details, layout.availableHeight),
+                              onDragEnd: _endPanelDrag,
+                              onDragCancel: () =>
+                                  _endPanelDrag(DragEndDetails()),
+                            ),
+                          ),
+                          builder: (context, child) =>
+                              Opacity(opacity: _panelStrength, child: child),
+                        ),
+                      ),
+                    ),
+                  ],
+                  if (!_fullScreen) _lockButton(window),
+                ],
+              );
+            },
+          ),
+        ),
       ),
-      ),
-    ),
     );
   }
 
