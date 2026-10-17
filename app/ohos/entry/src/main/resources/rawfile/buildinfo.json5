@@ -6,7 +6,7 @@
     },
     {
       "name": "enable_ohos_hybrid_composition",
-      "value": "false"
+      "value": "true"
     }
   ]
 }

@@ -16,7 +16,7 @@ struct SoftwareVideoSurface {
   private controller: VideoSurfaceController = new VideoSurfaceController();
   aboutToAppear(): void { this.controller.view = this.view; }
   build() {
-    XComponent({ id: `fq-video-${this.view?.viewId ?? -1}`, type: XComponentType.TEXTURE, controller: this.controller })
+    XComponent({ id: `fq-video-${this.view?.viewId ?? -1}`, type: XComponentType.SURFACE, controller: this.controller })
       .width('100%').height('100%')
       .onTouch((event: TouchEvent) => this.view?.forwardTouch(event))
   }

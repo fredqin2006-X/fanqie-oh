@@ -4,8 +4,8 @@ import 'package:flutter/services.dart';
 
 import '../../services/native_player.dart';
 
-/// Embeds the software decoder through an ArkUI texture node so Flutter can
-/// compose its existing controls and modal routes over the complete viewport.
+/// Displays software-decoded video directly on an ArkUI surface. The pinned
+/// emulator engine imports nested video textures as black after a cold start.
 class NativeVideoSurface extends StatelessWidget {
   const NativeVideoSurface({super.key, required this.textureId});
 
@@ -24,9 +24,7 @@ class NativeVideoSurface extends StatelessWidget {
         gestureRecognizers: const {},
       ),
       onCreatePlatformView: (params) {
-        // Do not opt into hybrid fallback: its overlay slice clips modal routes
-        // to the video rectangle in the pinned HarmonyOS engine.
-        final controller = PlatformViewsService.initOhosView(
+        final controller = PlatformViewsService.initExpensiveOhosView(
           id: params.id,
           viewType: params.viewType,
           layoutDirection: Directionality.of(context),
