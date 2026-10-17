@@ -203,6 +203,12 @@ class NativePlayer {
     return null;
   }
 
+  static Future<Map<Object?, Object?>?> readVideoFrame(int playerId, int serial) =>
+      _channel.invokeMapMethod<Object?, Object?>('videoFrame', {
+        'id': playerId,
+        'serial': serial,
+      });
+
   bool _disposed = false;
   bool _creationFailed = false;
   Future<int>? _createFuture;

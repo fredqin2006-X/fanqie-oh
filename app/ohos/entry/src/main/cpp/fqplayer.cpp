@@ -1,4 +1,5 @@
 #include "ijk_abi.h"
+#include "software_video_output.h"
 #include <napi/native_api.h>
 #include <native_window/external_window.h>
 #include <condition_variable>
@@ -7,13 +8,13 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
-
-extern "C" int fq_cpu_video_factories();
+#include <cstring>
 
 namespace {
 struct Event { int what, a, b; };
 struct Session {
     IjkMediaPlayer *player = nullptr;
+    void *output = nullptr;
     OHNativeWindow *window = nullptr;
     uint64_t surfaceId = 0;
     std::mutex mutex;
@@ -89,6 +90,7 @@ napi_value Create(napi_env env, napi_callback_info info) {
     s->player = ijkmp_android_create(MessageLoop);
     if (!s->player) { Close(*s); return Number(env, -1); }
     if (fq_cpu_video_factories() != factories + 1) { Close(*s); return Number(env, -1); }
+    s->output = fq_cpu_last_output();
     ijkmp_set_weak_thiz(s->player, s.get());
     ijkmp_android_set_surface(s->player, s->window, false);
     // Force FFmpeg software decoding: the fallback must not retry the failed codec.
@@ -136,6 +138,26 @@ napi_value SetSurface(napi_env env, napi_callback_info info) {
     s.window = window;
     s.surfaceId = surfaceId;
     return Number(env, 0);
+}
+
+napi_value Frame(napi_env env, napi_callback_info info) {
+    size_t argc = 2; napi_value argv[2]{}, result;
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    napi_get_null(env, &result);
+    if (argc != 2) return result;
+    auto found = sessions.find(Id(env, argv[0]));
+    if (found == sessions.end()) return result;
+    FqVideoFrame frame;
+    if (!fq_cpu_copy_frame(found->second->output, Id(env, argv[1]), frame)) return result;
+    napi_create_object(env, &result);
+    Set(env, result, "width", frame.width); Set(env, result, "height", frame.height);
+    Set(env, result, "serial", frame.serial);
+    napi_value buffer, pixels; void *data = nullptr;
+    if (napi_create_arraybuffer(env, frame.pixels.size(), &data, &buffer) != napi_ok) return nullptr;
+    std::memcpy(data, frame.pixels.data(), frame.pixels.size());
+    napi_create_typedarray(env, napi_uint8_array, frame.pixels.size(), buffer, 0, &pixels);
+    napi_set_named_property(env, result, "pixels", pixels);
+    return result;
 }
 
 napi_value Poll(napi_env env, napi_callback_info info) {
@@ -206,6 +228,7 @@ napi_value Init(napi_env env, napi_value exports) {
         {"create", nullptr, Create, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"poll", nullptr, Poll, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setSurface", nullptr, SetSurface, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"frame", nullptr, Frame, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"command", nullptr, Command, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"release", nullptr, Release, nullptr, nullptr, nullptr, napi_default, nullptr}
     };

@@ -110,6 +110,11 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
     }
     const id = call.argument('id') as number;
     const item = this.sessions.get(id);
+    if (call.method === 'videoFrame') {
+      result.success(item && !item.disposed && item.softwareId ?
+        software.frame(item.softwareId, (call.argument('serial') as number) ?? 0) : null);
+      return;
+    }
     if (!item) {
       if (call.method === 'dispose') { result.success(null); }
       else { result.error('PLAYER_DISPOSED', '播放器已关闭', null); }
@@ -253,14 +258,12 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
     const player = item.player; item.player = null;
     try { await player?.release(); } catch (_) { /* failed system decoder */ }
     if (item.disposed || !item.texture) { return; }
-    // Feed RGBA frames to Flutter's existing texture without IJK owning any EGL
-    // resources. The texture remains owned by Flutter through decoder shutdown.
+    // Flutter uploads the latest software RGBA frame as an image. This avoids
+    // the emulator's broken external-texture import and hybrid overlay slicing.
     const id = software.create(item.playable);
     if (id <= 0) { throw new Error('SOFTWARE_PLAYER_CREATE_FAILED'); }
     item.softwareId = id;
-    if (software.setSurface(id, item.texture.getSurfaceId().toString()) < 0) {
-      throw new Error('SOFTWARE_SURFACE_FAILED');
-    }
+    this.emit(item, 'nativeSurface', true);
     hilog.info(0x0000, 'FqPlayer', 'software fallback player=%{public}d', item.id);
     item.pollTimer = setInterval(() => this.pollSoftware(item), 200);
   }
