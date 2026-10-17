@@ -1505,7 +1505,7 @@ class _DramaPageState extends ConsumerState<DramaPage>
                   )
                 : null,
             // 全屏观看 = 唯一进全页播放器的入口；单击画面只切播放/暂停。
-            onFullscreen: () => _openPlayer(item),
+            onFullscreen: () => _openPlayer(item, startFullscreen: true),
             onQuickCatalog: () => _openQuickCatalog(item),
             // 标题行「剧名 >」= 官方进剧集详情页的入口（ql3/v0.a1）。
             onOpenSeriesDetail: () => _openSeriesDetail(item),
@@ -1533,6 +1533,7 @@ class _DramaPageState extends ConsumerState<DramaPage>
     int? startEpisodeIndex,
     List<Chapter>? loadedEpisodes,
     SeriesDetail? initialDetail,
+    bool startFullscreen = false,
   }) async {
     if (_openingId != null) return;
     setState(() => _openingId = item.id);
@@ -1578,6 +1579,7 @@ class _DramaPageState extends ConsumerState<DramaPage>
         context,
         MaterialPageRoute<void>(
           builder: (_) => PlayerPage(
+            startFullscreen: startFullscreen,
             bookId: contentId,
             kind: item.kind,
             title: item.title,
@@ -1679,7 +1681,7 @@ class _DramaPageState extends ConsumerState<DramaPage>
           _openPlayer(item, startEpisodeIndex: index, loadedEpisodes: episodes),
         );
       },
-      onFullscreen: () => unawaited(_openPlayer(item)),
+      onFullscreen: () => unawaited(_openPlayer(item, startFullscreen: true)),
       seriesLoader: widget.seriesDetailLoader,
       onRelatedSeriesSelected: (entry) => _openSeriesDetail(
         MediaItem(

@@ -2,7 +2,17 @@
 
 更新：2026-10-17（Asia/Shanghai）。当前为移植中的内部验证实现，**不是完整验收或正式发布版本**。产品 UI 沿用安卓；实际能力、已知限制及未验项见 [实施验收记录](acceptance/2026-10-16-porting.md)。
 
-## 最新播放修复包
+## 最新全屏与开孔适配包
+
+- 文件：`local-reports/delivery/fqapp-1.0.120-20261017-fullscreen-cutout-arm64-release-unsigned.hap`
+- ARM64 Release，正常 `lib/main.dart`，版本 `1.0.120+125`，debug=false，最低 HarmonyOS 6.1 / API 23。
+- 构建记录：`20261017T015958470Z-2e6eb6`；104,925,997 字节。
+- SHA-256：`a7f85d59c96984e55ba54c4c3904b9ec5038b5268d37df09a6eae5b10c195d0d`。
+- 全屏只留视频与已启用弹幕，按视频宽高固定方向，返回先退全屏；推荐流和弹层全屏入口直接进入此模式。全应用根据系统开孔避让区预留空白并匹配背景色。
+- 相关用例 87 项通过，分析无问题；[实现及验证范围](acceptance/2026-10-17-display.md)。本轮新增模拟器安装被自动审批拦截，新原生运行效果仍待用户人工真机复测。
+- 未签名，沿用 DevEco 研发签名/profile 后安装；没有推送或发布。
+
+## 上一版播放修复包
 
 源码 `49fc140`，正常 `lib/main.dart` 入口，ARM64 Release，版本 `1.0.120+125`，debug=false，最低 HarmonyOS 6.1 / API 23。构建记录 `20261017T013108550Z-fc2ada`。
 

@@ -62,6 +62,7 @@ class PlayerPage extends StatefulWidget {
   /// 官方短剧播放页形态（`apf.xml`）：竖屏无运输条、单击=播放/暂停。
   /// 详情页的电影/电视剧走通用形态（默认 false）。
   final bool shortSeries;
+  final bool startFullscreen;
 
   /// 播放页信息层的 AI 声明行。
   final bool aiGenerated;
@@ -82,6 +83,7 @@ class PlayerPage extends StatefulWidget {
     this.initialSeriesDetail,
     this.danmakuFetcher,
     this.shortSeries = false,
+    this.startFullscreen = false,
     this.aiGenerated = false,
   });
 
@@ -1352,6 +1354,7 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
       duration: _duration,
       playing: _playing,
       shortSeries: widget.shortSeries,
+      startFullscreen: widget.startFullscreen,
       watchedEpisodes: watchedIndexes(_watchedIds, widget.eps),
       interactionBlocked: _externalPanelOpen || _switchingSeries,
       aiGenerated: widget.aiGenerated,

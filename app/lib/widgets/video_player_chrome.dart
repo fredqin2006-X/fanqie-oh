@@ -60,6 +60,7 @@ class VideoPlayerChrome extends StatefulWidget {
   /// （feed 卡同款）；横屏是官方底条（`c0i` 控制行 + `cw7` 进度块，见
   /// `_landscapeBar`）。详情页的电影/电视剧仍走通用形态（默认 false）。
   final bool shortSeries;
+  final bool startFullscreen;
 
   /// 「作者声明：内容由AI生成」行（`video_detail.ai_usage_type`）。
   final bool aiGenerated;
@@ -176,6 +177,7 @@ class VideoPlayerChrome extends StatefulWidget {
     required this.onSelectEpisode,
     required this.onError,
     this.shortSeries = false,
+    this.startFullscreen = false,
     this.aiGenerated = false,
     this.showSeekHint = false,
     this.onSeekHintConsumed,
@@ -375,6 +377,13 @@ class _VideoPlayerChromeState extends State<VideoPlayerChrome>
     }
     _scheduleHide();
     _scheduleLockHide();
+    if (widget.startFullscreen) {
+      _fullScreen = true;
+      _visible = false;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) unawaited(_applySystemUi());
+      });
+    }
   }
 
   @override

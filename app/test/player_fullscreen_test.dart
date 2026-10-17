@@ -10,7 +10,8 @@ import 'support/fakes.dart';
 void main() {
   for (final portrait in [true, false]) {
     for (final shortSeries in [true, false]) {
-      testWidgets('fullscreen hides UI and locks ${portrait ? 'portrait' : 'landscape'} (short=$shortSeries)', (tester) async {
+      for (final startFullscreen in [true, false]) {
+      testWidgets('fullscreen hides UI and locks ${portrait ? 'portrait' : 'landscape'} (short=$shortSeries, immediate=$startFullscreen)', (tester) async {
         SharedPreferences.setMockInitialValues({});
         final orientations = <List<String>>[];
         tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
@@ -22,7 +23,7 @@ void main() {
         addTearDown(() => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, null));
         final player = FakeNativePlayer(width: portrait ? 720 : 1280, height: portrait ? 1280 : 720)..isPlaying = true;
         await tester.pumpWidget(MaterialApp(home: VideoPlayerChrome(
-          player: player, shortSeries: shortSeries, title: '不应在全屏显示的标题',
+          player: player, shortSeries: shortSeries, startFullscreen: startFullscreen, title: '不应在全屏显示的标题',
           episodes: [Chapter(itemId: '1', title: '第一集', volumeName: '')],
           currentIndex: 0, duration: player.duration, playing: true,
           danmakuEnabled: true,
@@ -31,7 +32,7 @@ void main() {
           child: const ColoredBox(key: ValueKey('actual-video'), color: Colors.blue),
         )));
         await tester.pump(const Duration(milliseconds: 100));
-        await tester.tap(shortSeries ? find.byKey(const ValueKey('player-fullscreen-pill')) : find.byTooltip('全屏'));
+        if (!startFullscreen) await tester.tap(shortSeries ? find.byKey(const ValueKey('player-fullscreen-pill')) : find.byTooltip('全屏'));
         await tester.pump(const Duration(milliseconds: 100));
         expect(orientations.last, [portrait ? 'DeviceOrientation.portraitUp' : 'DeviceOrientation.landscapeLeft']);
         expect(find.byKey(const ValueKey('actual-video')), findsOneWidget);
@@ -54,6 +55,7 @@ void main() {
         await tester.pumpWidget(const SizedBox.shrink());
         await player.dispose();
       });
+      }
     }
   }
 }

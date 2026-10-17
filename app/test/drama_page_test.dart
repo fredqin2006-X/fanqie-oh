@@ -258,6 +258,11 @@ void main() {
     ]) {
       expect(find.byKey(ValueKey(key)), findsNothing);
     }
+    expect(chrome().startFullscreen, isTrue);
+    expect(find.byKey(const ValueKey('player-comment-button')), findsNothing);
+    await tester.binding.handlePopRoute();
+    await tester.pump();
+    expect(find.byType(PlayerPage), findsOneWidget);
     expect(find.byKey(const ValueKey('player-comment-button')), findsOneWidget);
     final player = seams.players.last;
     player.calls.clear();
