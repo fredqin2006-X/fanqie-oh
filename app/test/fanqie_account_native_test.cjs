@@ -77,3 +77,12 @@ test('engine detach cancels a pending login without clearing the saved official 
   const f = fixture(); const pending = f.call('login'); await tick();
   f.plugin.onDetachedFromEngine({}); assert.equal(await pending, null); assert.equal(f.state.clear, 0);
 });
+test('a destroyed window cannot strand login cancellation or engine cleanup', async () => {
+  const f = fixture(); const pending = f.call('login'); await tick();
+  f.session.closePage = () => { throw Error('window destroyed'); };
+  await f.call('cancelLogin'); assert.equal(await pending, null);
+  assert.equal(f.session.pending, null); assert.equal(f.session.closePage, null);
+  const next = f.call('login'); await tick();
+  f.session.closePage = () => { throw Error('router unavailable'); };
+  f.plugin.onDetachedFromEngine({}); assert.equal(await next, null);
+});

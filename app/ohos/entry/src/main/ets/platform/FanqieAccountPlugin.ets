@@ -26,8 +26,9 @@ export class FanqieLoginSession {
     const result = FanqieLoginSession.pending;
     const close = FanqieLoginSession.closePage;
     FanqieLoginSession.pending = null; FanqieLoginSession.closePage = null;
-    if (close) { close(); }
-    if (result) { result.success(cookie); }
+    try { if (close) { close(); } }
+    catch (_) { /* A closing window must not strand the pending Flutter call. */ }
+    finally { if (result) { result.success(cookie); } }
   }
 }
 

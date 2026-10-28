@@ -1,4 +1,6 @@
 import { webview } from '@kit.ArkWeb';
+import { window } from '@kit.ArkUI';
+import { common } from '@kit.AbilityKit';
 import { FanqieLoginSession } from '../platform/FanqieAccountPlugin';
 
 interface ViewportMetrics { fit: boolean; editing: boolean; factor: number; }
@@ -42,6 +44,13 @@ struct FanqieLogin {
   private poll: number = -1;
   private alive: boolean = false;
   private fitting: boolean = false;
+  private win: window.Window | null = null;
+  private avoidChanged = (_event: window.AvoidAreaOptions): void => { this.updateSafeArea(); };
+  private sizeChanged = (_size: window.Size): void => { this.updateSafeArea(); };
+  @State private safeTop: number = 0;
+  @State private safeBottom: number = 0;
+  @State private safeLeft: number = 0;
+  @State private safeRight: number = 0;
   @State private dark: boolean = false;
   @State private eink: boolean = false;
   @State private progress: number = 0;
@@ -55,9 +64,13 @@ struct FanqieLogin {
       this.getUIContext().getRouter().back(); return;
     }
     this.alive = true;
+    this.observeSafeArea();
     this.dark = FanqieLoginSession.dark; this.eink = FanqieLoginSession.eink;
     FanqieLoginSession.closePage = () => {
-      if (this.alive) { this.getUIContext().getRouter().back(); }
+      if (this.alive) {
+        this.alive = false; this.stopPolling(); this.stopSafeArea();
+        this.getUIContext().getRouter().back();
+      }
     };
     webview.WebCookieManager.fetchCookie(FanqieLoginSession.home).then(cookie => {
       if (this.alive && FanqieLoginSession.sessionCookie(cookie)) { this.hint = '已保留上次登录，可直接读取书架。验证时会自动缩放。'; }
@@ -65,18 +78,56 @@ struct FanqieLogin {
   }
   aboutToDisappear(): void {
     this.alive = false; this.stopPolling();
+    this.stopSafeArea();
     // A router back or engine detach resolves the original call exactly once.
     FanqieLoginSession.finish(this.session, null);
   }
   onBackPress(): boolean { FanqieLoginSession.finish(this.session, null); return true; }
   private stopPolling(): void { if (this.poll >= 0) { clearInterval(this.poll); this.poll = -1; } }
+  private activeSession(): boolean {
+    return this.alive && this.session === FanqieLoginSession.id && FanqieLoginSession.pending !== null;
+  }
+  private async observeSafeArea(): Promise<void> {
+    try {
+      const win = await window.getLastWindow(getContext(this) as common.UIAbilityContext);
+      if (!this.activeSession()) { return; }
+      this.win = win;
+      win.on('avoidAreaChange', this.avoidChanged);
+      win.on('windowSizeChange', this.sizeChanged);
+      this.updateSafeArea();
+    } catch (_) { /* Window destruction is handled by the route cancellation. */ }
+  }
+  private updateSafeArea(): void {
+    const win = this.win;
+    if (!win || !this.activeSession()) { return; }
+    try {
+      const bounds = win.getWindowProperties().windowRect;
+      let top = 0; let bottom = 0; let left = 0; let right = 0;
+      for (const kind of [window.AvoidAreaType.TYPE_SYSTEM, window.AvoidAreaType.TYPE_CUTOUT,
+        window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR]) {
+        const area = win.getWindowAvoidArea(kind);
+        if (area.topRect.height > 0) { top = Math.max(top, area.topRect.top + area.topRect.height); }
+        if (area.bottomRect.height > 0) { bottom = Math.max(bottom, bounds.height - area.bottomRect.top); }
+        if (area.leftRect.width > 0) { left = Math.max(left, area.leftRect.left + area.leftRect.width); }
+        if (area.rightRect.width > 0) { right = Math.max(right, bounds.width - area.rightRect.left); }
+      }
+      const ui = this.getUIContext();
+      this.safeTop = ui.px2vp(top); this.safeBottom = ui.px2vp(bottom);
+      this.safeLeft = ui.px2vp(left); this.safeRight = ui.px2vp(right);
+    } catch (_) { /* Retain the last valid insets while the window is changing. */ }
+  }
+  private stopSafeArea(): void {
+    const win = this.win; this.win = null;
+    try { win?.off('avoidAreaChange', this.avoidChanged); } catch (_) {}
+    try { win?.off('windowSizeChange', this.sizeChanged); } catch (_) {}
+  }
   private async fit(force: boolean): Promise<void> {
-    if (!this.alive || this.fitting) { return; }
+    if (!this.activeSession() || this.fitting) { return; }
     this.fitting = true;
     try {
       if (!FanqieLoginSession.allowed(this.controller.getUrl())) { return; }
       const metrics = JSON.parse(await this.controller.runJavaScript(VIEWPORT_SCRIPT)) as ViewportMetrics;
-      if (!this.alive || (!force && (!metrics.fit || metrics.editing))) { return; }
+      if (!this.activeSession() || (!force && (!metrics.fit || metrics.editing))) { return; }
       if (Number.isFinite(metrics.factor) && metrics.factor < 0.98) { this.controller.zoom(Math.max(0.1, metrics.factor)); }
     } catch (_) {} finally { this.fitting = false; }
   }
@@ -109,10 +160,15 @@ struct FanqieLogin {
         .layoutWeight(1).width('100%').javaScriptAccess(true).domStorageAccess(true)
         .fileAccess(false).mixedMode(MixedMode.None).zoomAccess(true).multiWindowAccess(false)
         .onLoadIntercept(event => !FanqieLoginSession.allowed(event.data.getRequestUrl()))
-        .onProgressChange(event => { this.progress = event.newProgress; })
-        .onPageBegin(() => { this.stopPolling(); })
-        .onPageEnd(() => { this.stopPolling(); this.poll = setInterval(() => { this.fit(false); }, 650); })
-        .onSslErrorEventReceive(event => { event.handler.handleCancel(); this.hint = '官方页面安全连接失败，请返回后重试。'; })
+        .onProgressChange(event => { if (this.activeSession()) { this.progress = event.newProgress; } })
+        .onPageBegin(() => { if (this.activeSession()) { this.stopPolling(); } })
+        .onPageEnd(() => {
+          if (this.activeSession()) { this.stopPolling(); this.poll = setInterval(() => { this.fit(false); }, 650); }
+        })
+        .onSslErrorEventReceive(event => {
+          event.handler.handleCancel();
+          if (this.activeSession()) { this.hint = '官方页面安全连接失败，请返回后重试。'; }
+        })
       Column() {
         Button('完成登录，读取书架', { type: ButtonType.Normal }).width('100%').height(50).borderRadius(14)
           .fontSize(15).fontColor(Color.White).backgroundColor(this.eink ? '#202020' : '#e95036')
@@ -121,5 +177,6 @@ struct FanqieLogin {
           .margin({ top: 8 })
       }.width('100%').padding({ left: 16, right: 16, top: 8, bottom: 12 })
     }.width('100%').height('100%').backgroundColor(this.dark ? '#151515' : '#ffffff')
+      .padding({ top: this.safeTop, bottom: this.safeBottom, left: this.safeLeft, right: this.safeRight })
   }
 }

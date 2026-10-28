@@ -18,5 +18,5 @@
   "originalPortBaseline": "5938f25dab2015f502ded1f2079ec2a51b8b4bc6",
   "commitsSincePortBaseline": 261,
   "validation": "Compared every reference file with a clean checkout of the pinned upstream commit using SHA-256 and compared complete file inventories. The Android reference remains excluded from the HarmonyOS repository.",
-  "scope": "Reference synchronization and source audit only; this does not mean all upstream changes were imported into app/. No Android build or device validation was performed."
+  "scope": "This file records reference synchronization evidence. The complete Harmony feature integration and its separate build/test/device boundaries are recorded in 2026-10-28-android-followup.md and ../acceptance/2026-10-28-upstream-port.md. No Android build was performed."
 }
