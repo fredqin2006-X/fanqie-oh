@@ -39,6 +39,10 @@ class SearchPage extends StatefulWidget {
   final Future<MediaItem?> Function(String id)? idSearchLoader;
   final SearchHistoryRepository? historyStore;
 
+  /// 打开时选中的分类页签。分区入口把语境带进来：短剧分区从漫剧频道进
+  /// 搜索落「漫剧」，其余频道落「短剧」；缺省仍是「综合」。
+  final SearchCategory initialCategory;
+
   /// Optional discovery sources. Leaving them null fetches from the backend
   /// unless another loader was injected, which marks the caller as offline (the
   /// rule the other pages follow).
@@ -53,6 +57,7 @@ class SearchPage extends StatefulWidget {
     this.historyStore,
     this.suggestLoader,
     this.hotSearchLoader,
+    this.initialCategory = SearchCategory.general,
   });
 
   @override
@@ -61,8 +66,12 @@ class SearchPage extends StatefulWidget {
 
 class _SearchPageState extends State<SearchPage> {
   static const _paginationThreshold = 480.0;
-  static const _categories = _SearchCategory.values;
+  static const _categories = SearchCategory.values;
   static const _listViewPreference = 'search_list_view';
+  static const _minimumScorePreference = 'search_minimum_score';
+
+  /// The thresholds the dropdown offers; storage may only hold one of these.
+  static const _scoreThresholds = <double>[0, 8, 9];
 
   final TextEditingController _ctrl = TextEditingController();
   final ScrollController _scrollController = ScrollController(
@@ -77,6 +86,12 @@ class _SearchPageState extends State<SearchPage> {
   bool _listView = false;
   bool _layoutChosen = false;
   Future<void> _layoutWrite = Future<void>.value();
+
+  /// Guards against a late preference read overwriting a choice the user
+  /// already made while the read was in flight (same contract as
+  /// [_layoutChosen]).
+  bool _scoreChosen = false;
+  Future<void> _scoreWrite = Future<void>.value();
 
   /// In-flight search / id-lookup. Superseded searches and page disposal cancel
   /// it so a fast typist does not leave a queue of upstream requests behind.
@@ -115,9 +130,12 @@ class _SearchPageState extends State<SearchPage> {
   @override
   void initState() {
     super.initState();
+    // 首帧就停在该页签：分区入口（短剧/漫剧）进来的搜索不该先闪「综合」。
+    _tabIndex = _categories.indexOf(widget.initialCategory);
     _scrollController.addListener(_onScroll);
     _loadHistory();
     unawaited(_loadLayout());
+    unawaited(_loadMinimumScore());
     unawaited(_loadHotSearch());
     final initial = widget.initialQuery?.trim() ?? '';
     if (initial.isNotEmpty) {
@@ -136,6 +154,45 @@ class _SearchPageState extends State<SearchPage> {
     } catch (_) {
       // Search remains usable if local preferences cannot be read.
     }
+  }
+
+  /// Restores the rating threshold the viewer picked last time.
+  ///
+  /// The dropdown used to reset to 「评分不限」 on every visit, so a viewer who
+  /// only reads well-rated works had to re-pick the threshold after each
+  /// search. Only the two offered thresholds are accepted; anything else in
+  /// storage is treated as 「不限」 rather than filtered invisibly.
+  Future<void> _loadMinimumScore() async {
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      if (!mounted || _scoreChosen) return;
+      final saved = preferences.getDouble(_minimumScorePreference);
+      if (saved == null || !_scoreThresholds.contains(saved)) return;
+      setState(() => _minimumScore = saved);
+    } catch (_) {
+      // Search remains usable if local preferences cannot be read.
+    }
+  }
+
+  void _selectMinimumScore(double value) {
+    setState(() {
+      _scoreChosen = true;
+      _minimumScore = value;
+    });
+    // Serialize rapid picks so the final user choice is persisted last.
+    _scoreWrite = _scoreWrite.then((_) async {
+      try {
+        final preferences = await SharedPreferences.getInstance();
+        if (!await preferences.setDouble(_minimumScorePreference, value)) {
+          throw StateError('Search rating threshold was not saved');
+        }
+      } catch (_) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('评分筛选未保存，本次选择仍有效')),
+        );
+      }
+    });
   }
 
   void _toggleLayout() {
@@ -405,7 +462,7 @@ class _SearchPageState extends State<SearchPage> {
       final page = separateManjuSearchTabs(sources).firstWhere(
         (tab) =>
             tab.title == category.title ||
-            (category == _SearchCategory.book &&
+            (category == SearchCategory.book &&
                 tab.title == category.sourceTitle),
         orElse: () => SearchTab(title: category.title, items: []),
       );
@@ -712,7 +769,7 @@ class _SearchPageState extends State<SearchPage> {
                       ? null
                       : (value) {
                           if (value != null) {
-                            setState(() => _minimumScore = value);
+                            _selectMinimumScore(value);
                           }
                         },
                 ),
@@ -939,9 +996,15 @@ class _SearchPageState extends State<SearchPage> {
               ),
               const SizedBox(height: 6),
               Text(
+                // Length is what separates a 500-chapter grind from a
+                // 100-chapter one, so it belongs next to the kind instead of
+                // only on the detail page. Novels carry `word_number`;
+                // dramas/manju carry an episode count in `ep`.
                 [
                   if (item.author.isNotEmpty) item.author,
                   kindLabels[item.kind] ?? item.kind,
+                  if (mediaLengthLabel(item).isNotEmpty)
+                    mediaLengthLabel(item),
                   if (item.score != null)
                     '${item.score!.toStringAsFixed(1)}分'
                   else
@@ -1016,7 +1079,11 @@ class _SearchPageState extends State<SearchPage> {
   }
 }
 
-enum _SearchCategory {
+/// 搜索页的分类页签。
+///
+/// 公开是给分区入口用的：短剧分区的搜索要带上频道语境（漫剧频道落「漫剧」、
+/// 其余频道落「短剧」），[SearchPage.initialCategory] 直接收这个枚举。
+enum SearchCategory {
   general('综合', 1),
   book('小说', 3, 'book'),
   video('短剧', 11, 'video'),
@@ -1024,7 +1091,7 @@ enum _SearchCategory {
   manga('漫画', 8, 'manga'),
   audio('听书', 2, 'audio');
 
-  const _SearchCategory(this.title, this.tabType, [this.kind]);
+  const SearchCategory(this.title, this.tabType, [this.kind]);
 
   final String title;
   final int tabType;

@@ -4,12 +4,14 @@ import { fileIo as fs, picker } from '@kit.CoreFileKit';
 import { util } from '@kit.ArkTS';
 import { systemShare } from '@kit.ShareKit';
 import { cryptoFramework } from '@kit.CryptoArchitectureKit';
+import { zlib } from '@kit.BasicServicesKit';
 
 // Only files explicitly selected in the system picker cross the sandbox boundary.
 // No storage-wide permission, persistent URI grant, or background upload is used.
 export class DocumentPlugin implements FlutterPlugin, MethodCallHandler {
   private channels: MethodChannel[] = [];
   private busy: boolean = false;
+  private captureQueue: Promise<void> = Promise.resolve();
   private context: common.UIAbilityContext;
   constructor(context: common.UIAbilityContext) { this.context = context; }
   getUniqueClassName(): string { return 'FqDocumentPlugin'; }
@@ -23,7 +25,14 @@ export class DocumentPlugin implements FlutterPlugin, MethodCallHandler {
     for (const channel of this.channels) { channel.setMethodCallHandler(null); } this.channels = [];
   }
   onMethodCall(call: MethodCall, result: MethodResult): void {
-    if (!['pickBookFile', 'openBackup', 'saveBackup', 'saveText', 'shareText'].includes(call.method)) { result.notImplemented(); return; }
+    if (['storeFanqieCapture', 'storeFanqieCapturePart', 'latestFanqieCapture', 'readFanqieCapturePart'].includes(call.method)) {
+      this.captureQueue = this.captureQueue.then(async () => {
+        try { result.success(await this.captureFile(call)); }
+        catch (_) { result.error('CAPTURE_IO_FAILED', '本机采集文件读写失败，可尝试导出', null); }
+      });
+      return;
+    }
+    if (!['pickBookFile', 'openBackup', 'saveBackup', 'exportFanqieCapture', 'saveText', 'shareText'].includes(call.method)) { result.notImplemented(); return; }
     if (this.busy) { result.error('PICKER_BUSY', '请先完成当前文件操作', null); return; }
     this.busy = true;
     this.handle(call).then(value => result.success(value)).catch(() => {
@@ -31,7 +40,7 @@ export class DocumentPlugin implements FlutterPlugin, MethodCallHandler {
     }).finally(() => { this.busy = false; });
   }
   async pickFont(): Promise<Map<string, Object> | null> {
-    const uri = await this.select(['字体|.ttf,.otf']);
+    const uri = await this.select(['字体|.ttf,.otf,.ttc']);
     if (!uri) { return null; }
     const bytes = await this.read(uri, 32 * 1024 * 1024);
     const signature = Array.from(bytes.subarray(0, 4)).join(',');
@@ -68,6 +77,7 @@ export class DocumentPlugin implements FlutterPlugin, MethodCallHandler {
         if (!(bytes instanceof Uint8Array) || bytes.length > 16 * 1024 * 1024) { throw new Error('BACKUP_SIZE'); }
         return (await this.save(call.argument('name') as string, bytes, '.json')) !== null;
       }
+      case 'exportFanqieCapture': return this.exportCapture(call);
       case 'saveText': {
         const text = call.argument('text') as string;
         if (typeof text !== 'string') { throw new Error('TEXT_INVALID'); }
@@ -86,6 +96,78 @@ export class DocumentPlugin implements FlutterPlugin, MethodCallHandler {
       }
     }
     return null;
+  }
+  private captureDirectory(): string {
+    const path = this.context.filesDir + '/fanqie-library-captures';
+    if (!fs.accessSync(path)) { fs.mkdirSync(path); }
+    if (!fs.lstatSync(path).isDirectory() || fs.lstatSync(path).isSymbolicLink()) { throw new Error('CAPTURE_DIRECTORY'); }
+    return path;
+  }
+  private checkedBytes(call: MethodCall): Uint8Array {
+    const bytes = call.argument('bytes') as Uint8Array;
+    if (!(bytes instanceof Uint8Array) || bytes.length < 1 || bytes.length > 16 * 1024 * 1024) { throw new Error('CAPTURE_SIZE'); }
+    return bytes;
+  }
+  private capturePart(name: string): string {
+    if (typeof name !== 'string' || !/^part-[0-9]+-[a-fA-F0-9-]+\.json$/.test(name)) { throw new Error('PART_NAME'); }
+    const path = this.captureDirectory() + '/' + name;
+    const stat = fs.lstatSync(path);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 1 || stat.size > 16 * 1024 * 1024) { throw new Error('PART_SIZE'); }
+    return path;
+  }
+  private async captureFile(call: MethodCall): Promise<Object | null> {
+    const dir = this.captureDirectory();
+    if (call.method === 'readFanqieCapturePart') {
+      return this.read(this.capturePart(call.argument('name') as string), 16 * 1024 * 1024);
+    }
+    if (call.method === 'latestFanqieCapture') {
+      const names = fs.listFileSync(dir).filter(name => /^capture-[0-9]+-[a-fA-F0-9-]+\.json$/.test(name)).sort();
+      if (names.length === 0) { return null; }
+      const path = dir + '/' + names[names.length - 1];
+      if (!fs.lstatSync(path).isFile() || fs.lstatSync(path).isSymbolicLink()) { throw new Error('CAPTURE_FILE'); }
+      return this.read(path, 16 * 1024 * 1024);
+    }
+    const bytes = this.checkedBytes(call);
+    const part = call.method === 'storeFanqieCapturePart';
+    const name = `${part ? 'part' : 'capture'}-${Date.now()}-${util.generateRandomUUID()}.json`;
+    const temporary = dir + '/pending-' + util.generateRandomUUID() + '.tmp';
+    try {
+      await this.write(temporary, bytes);
+      await fs.rename(temporary, dir + '/' + name);
+    } finally { if (fs.accessSync(temporary)) { fs.unlinkSync(temporary); } }
+    return part ? name : true;
+  }
+  private async exportCapture(call: MethodCall): Promise<boolean> {
+    const bytes = this.checkedBytes(call);
+    const names = call.argument('parts') as string[];
+    if (!Array.isArray(names) || names.length > 2000 || new Set(names).size !== names.length) { throw new Error('CAPTURE_PARTS'); }
+    await this.captureQueue;
+    // Stage only the manifest and its explicitly named immutable parts. The ZIP
+    // encoder streams files on disk rather than loading a complete account into RAM.
+    const sources = names.map(name => this.capturePart(name));
+    const name = call.argument('name') as string;
+    if (typeof name !== 'string' || !/^[a-zA-Z0-9_.-]{1,100}\.zip$/.test(name)) { throw new Error('ZIP_NAME'); }
+    const uris = await new picker.DocumentViewPicker(this.context).save({ newFileNames: [name], fileSuffixChoices: ['.zip'] });
+    if (!uris.length) { return false; }
+    const staging = this.context.cacheDir + '/capture-export-' + util.generateRandomUUID();
+    const archive = staging + '.zip';
+    fs.mkdirSync(staging);
+    const staged: string[] = [];
+    try {
+      const manifest = staging + '/manifest.json';
+      staged.push(manifest); await this.write(manifest, bytes);
+      for (let i = 0; i < names.length; i++) {
+        const path = staging + '/' + names[i]; staged.push(path); await fs.copyFile(sources[i], path);
+      }
+      await zlib.compressFiles(staged, archive, {});
+      const destination = await fs.open(uris[0], fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
+      try { await fs.copyFile(archive, destination.fd); } finally { await fs.close(destination); }
+      return true;
+    } finally {
+      for (const path of staged) { if (fs.accessSync(path)) { fs.unlinkSync(path); } }
+      if (fs.accessSync(archive)) { fs.unlinkSync(archive); }
+      if (fs.accessSync(staging)) { fs.rmdirSync(staging); }
+    }
   }
   private async select(filters: string[]): Promise<string | null> {
     const uris = await new picker.DocumentViewPicker(this.context).select({ maxSelectNumber: 1, fileSuffixFilters: filters });

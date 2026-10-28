@@ -10,3 +10,5 @@
 *.png binary
 *.webp binary
 *.woff2 binary
+# Preserve the imported third-party distribution's whitespace verbatim.
+app/native/third_party/kissfft/** whitespace=-blank-at-eol,-blank-at-eof

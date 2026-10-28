@@ -8,6 +8,7 @@ import 'package:fqapp/pages/settings_page.dart';
 import 'package:fqapp/services/episode_source_cache.dart';
 import 'package:fqapp/services/inline_video_playback.dart';
 import 'package:fqapp/services/player_preferences.dart';
+import 'package:fqapp/services/quality_memory.dart';
 
 import 'support/fakes.dart';
 
@@ -27,7 +28,10 @@ Map<String, dynamic> _response() => {
 };
 
 void main() {
-  setUp(() => SharedPreferences.setMockInitialValues({}));
+  setUp(() {
+    SharedPreferences.setMockInitialValues({});
+    QualityMemory.clearForTesting();
+  });
 
   test(
     'missing or invalid saved resolution means highest; valid choice persists',

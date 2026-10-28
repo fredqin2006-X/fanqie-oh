@@ -1,0 +1,67 @@
+{
+  "upstreamCommit": "43b20ba40d91d98322f29344847788ac54a15971",
+  "reviewedOn": "2026-10-28",
+  "policy": "Source parity review; does not establish rendered or device equivalence.",
+  "exceptions": [
+    {
+      "path": "assets/branding/README.md",
+      "reason": "Retain Harmony branding provenance",
+      "upstreamHash": "d0df1fb7cc4ba3169af102366ebebdcad8540de1d00e640741606e46e6f80b3c",
+      "harmonyHash": "6ecacabcbfa43216d99a98e992a37e8407f426b0397b27f51aa8fd457634ea7b"
+    },
+    {
+      "path": "assets/images/app_logo.webp",
+      "reason": "Retain published Harmony app logo",
+      "upstreamHash": "b8d6ed5a0521c5db8313c5096113d6264ab3b0f2d4383f4a16cfb619826e0ede",
+      "harmonyHash": "b88b043643add3bed04cf5256cc563110d6d00365df0a276e2560753176c6cd0"
+    },
+    {
+      "path": "lib/main.dart",
+      "reason": "Harmony bootstrap licenses, safe-area wrapper and retained app identity",
+      "upstreamHash": "86446bf6d64f176317ee1a225cf8887529eccc7e2669a978321a8e160fabd2a7",
+      "harmonyHash": "c90994085e8cf1b2b8fdac9dae1a7372ee0d2c8cfcc126afde6e150b244687dc"
+    },
+    {
+      "path": "lib/pages/about_page.dart",
+      "reason": "Harmony brand, version, source and feedback links; upstream support attribution",
+      "upstreamHash": "62165be0d4f580fc28d8cc5937aefbf5f784e708505ed00ca62cf8c5c3b7d3f8",
+      "harmonyHash": "2af8f5ef73738de67defc9f1409158d59707b0062d07f85d22e32a149de6f54e"
+    },
+    {
+      "path": "lib/pages/drama_page.dart",
+      "reason": "Harmony video surface, saved resolution and full-screen entry integration",
+      "upstreamHash": "6fe9afbe294960becf19102d31fd28e5749280fa668ee00ed6291ecddbc90bad",
+      "harmonyHash": "8f84bae59430bb7b28681ce043edde63a94f211dace72297ac225116715b3d01"
+    },
+    {
+      "path": "lib/pages/log_viewer_page.dart",
+      "reason": "Retain Harmony brand in diagnostics export",
+      "upstreamHash": "3a45269f27fb194c4c3fe5b78fb63e1df1eca8531e3116e651968e421a788d87",
+      "harmonyHash": "b70934a60dcc8c9b770d0de7fdf60778822ab6e7fd5bd9f7d7ecaa5791194fdf"
+    },
+    {
+      "path": "lib/pages/player_page.dart",
+      "reason": "Harmony orientation, native surface, brightness leases and playback gesture integration",
+      "upstreamHash": "8399ff2c477a7768c8b9caf8d9511dacc755d1a91d645b35fb6d8c2d804d81ea",
+      "harmonyHash": "b52eae24de504e1c548baa93c8c24e1ed5f792d3a6fbdb843c8f2885c2e4a03e"
+    },
+    {
+      "path": "lib/pages/reader_page.dart",
+      "reason": "Harmony display-safe background around upstream reader",
+      "upstreamHash": "39f15ed561596d46d37ef26add59c11d83615d5bf672653c6212a38fa650e796",
+      "harmonyHash": "7f1d5d4aeb7a03bfe09728d9027470aeb73bdca08b547e2352824a4c01cd0b29"
+    },
+    {
+      "path": "lib/pages/settings_page.dart",
+      "reason": "Retain default video resolution and show only the supported Harmony audio engine",
+      "upstreamHash": "19f62c6b691612f9a923753affaff5bb8d1398ef4d4e4afd034e8a32f41c558c",
+      "harmonyHash": "f720c5070ded8e4a3a59a610fa99823eed15a2bf39c6c4baeee6ec9caaf0ddd8"
+    },
+    {
+      "path": "lib/widgets/video_player_chrome.dart",
+      "reason": "Harmony window brightness, player volume, gestures and PiP lifecycle",
+      "upstreamHash": "0a9daaf7c498966d89b7db59ca249333cb9687f8e2023f3315d77f65e2c236f8",
+      "harmonyHash": "65dc87b354dd397ae71349b6f3e75a7a430c21b2e36b5f824941dce94bce784f"
+    }
+  ]
+}

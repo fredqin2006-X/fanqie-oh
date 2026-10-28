@@ -81,7 +81,9 @@ export class ReaderPlugin implements FlutterPlugin, MethodCallHandler, StreamHan
               if (area.topRect.height > 0) { this.bars.push('status'); }
               if (area.bottomRect.height > 0 || nav.bottomRect.height > 0) { this.bars.push('navigation'); }
             }
-            await win.setWindowSystemBarEnable(call.argument('enabled') === true ? [] : this.bars); result.success(null); break;
+            const visible: Array<'status' | 'navigation'> = call.argument('enabled') === true
+              ? (call.argument('showStatusBar') === true ? ['status'] : []) : this.bars;
+            await win.setWindowSystemBarEnable(visible); result.success(null); break;
           }
           case 'suspend': case 'stop': await this.finish(); result.success(null); break;
           default: result.notImplemented();

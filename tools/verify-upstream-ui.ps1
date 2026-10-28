@@ -1,43 +1,55 @@
 #requires -Version 7.0
-# Read-only comparison against the explicitly named local Android reference.
-param([string]$ReferenceRoot = (Join-Path $PSScriptRoot '../fqapp-source-code-android/fqapp-master'))
+# Source-level UI parity only; this does not claim rendered/device equivalence.
+param(
+    [string]$ReferenceRoot = (Join-Path $PSScriptRoot '../fqapp-source-code-android/fqapp-master'),
+    [string]$ReviewFile = (Join-Path $PSScriptRoot '../docs/upstream/ui-parity-review.json')
+)
 $ErrorActionPreference = 'Stop'
 $taskApp = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../app'))
 $taskReference = [IO.Path]::GetFullPath($ReferenceRoot)
+$taskReview = Get-Content -LiteralPath $ReviewFile -Raw | ConvertFrom-Json
+$taskReferenceHead = (& git -C $taskReference rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or $taskReferenceHead -ne $taskReview.upstreamCommit) { throw 'UI review belongs to a different upstream revision.' }
+
+function Get-FqUiHash([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return 'missing' }
+    $taskExtension = [IO.Path]::GetExtension($Path).ToLowerInvariant()
+    if ($taskExtension -in @('.dart', '.json', '.js', '.md', '.html', '.css', '.txt', '.svg', '.yaml')) {
+        $taskText = [IO.File]::ReadAllText($Path).Replace("`r`n", "`n").TrimEnd()
+        $taskBytes = [Text.Encoding]::UTF8.GetBytes($taskText)
+        return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($taskBytes)).ToLowerInvariant()
+    }
+    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
 $taskCode = @(Get-Item (Join-Path $taskReference 'lib/main.dart'))
 $taskCode += Get-ChildItem (Join-Path $taskReference 'lib/pages'),(Join-Path $taskReference 'lib/widgets') -File -Recurse
 $taskAssets = @(Get-ChildItem (Join-Path $taskReference 'assets') -File -Recurse)
-$taskDifferent = [Collections.Generic.List[string]]::new()
-$taskAssetWhitespace = 0
-$taskBridgeOnly = 0
-foreach ($taskFile in $taskCode) {
-    $taskRelative = [IO.Path]::GetRelativePath($taskReference, $taskFile.FullName)
-    $taskDestination = Join-Path $taskApp $taskRelative
-    if (-not (Test-Path -LiteralPath $taskDestination -PathType Leaf)) { $taskDifferent.Add($taskRelative); continue }
-    # Git may normalize CRLF; a stripped blank line at EOF is nonvisual.
-    $taskLeft = [IO.File]::ReadAllText($taskFile.FullName).Replace("`r`n", "`n").TrimEnd()
-    $taskRight = [IO.File]::ReadAllText($taskDestination).Replace("`r`n", "`n").TrimEnd()
-    if ($taskRelative.Replace('\','/') -eq 'lib/pages/listen_mode_page.dart' -and $taskRight.Contains("      player.audioOnly = true;`n")) {
-        $taskRight = $taskRight.Replace("      player.audioOnly = true;`n", '')
-        $taskBridgeOnly++
+$taskUnexpected = [Collections.Generic.List[string]]::new()
+$taskReviewed = [Collections.Generic.List[string]]::new()
+$taskEqualCode = 0
+$taskEqualAssets = 0
+foreach ($taskFile in @($taskCode) + @($taskAssets)) {
+    $taskRelative = [IO.Path]::GetRelativePath($taskReference, $taskFile.FullName).Replace('\', '/')
+    $taskLeft = Get-FqUiHash $taskFile.FullName
+    $taskRight = Get-FqUiHash (Join-Path $taskApp $taskRelative)
+    if ($taskLeft -eq $taskRight) {
+        if ($taskRelative.StartsWith('lib/')) { $taskEqualCode++ } else { $taskEqualAssets++ }
+        continue
     }
-    if ($taskLeft -cne $taskRight) { $taskDifferent.Add($taskRelative) }
+    $taskMatch = @($taskReview.exceptions | Where-Object { $_.path -ceq $taskRelative })
+    if ($taskMatch.Count -eq 1 -and $taskMatch[0].upstreamHash -eq $taskLeft -and
+        $taskMatch[0].harmonyHash -eq $taskRight -and $taskMatch[0].reason) {
+        $taskReviewed.Add($taskRelative)
+    } else { $taskUnexpected.Add($taskRelative) }
 }
-foreach ($taskFile in $taskAssets) {
-    $taskRelative = [IO.Path]::GetRelativePath($taskReference, $taskFile.FullName)
-    $taskDestination = Join-Path $taskApp $taskRelative
-    if (-not (Test-Path -LiteralPath $taskDestination -PathType Leaf)) { $taskDifferent.Add($taskRelative); continue }
-    if ((Get-FileHash -LiteralPath $taskDestination).Hash -ne (Get-FileHash -LiteralPath $taskFile.FullName).Hash) {
-        # Imported web/index.html had one whitespace-only blank line stripped
-        # to pass Git whitespace checks. Permit that exact nonvisual difference.
-        $taskEquivalent = $false
-        if ($taskRelative.Replace('\','/') -eq 'assets/web/index.html') {
-            $taskLeft = [regex]::Replace([IO.File]::ReadAllText($taskFile.FullName).Replace("`r`n", "`n"), '(?m)^[\t ]+$', '')
-            $taskRight = [regex]::Replace([IO.File]::ReadAllText($taskDestination).Replace("`r`n", "`n"), '(?m)^[\t ]+$', '')
-            $taskEquivalent = $taskLeft -ceq $taskRight
-        }
-        if ($taskEquivalent) { $taskAssetWhitespace++ } else { $taskDifferent.Add($taskRelative) }
-    }
-}
-[pscustomobject]@{uiCodeFiles=$taskCode.Count;uiNonvisualAudioFlag=$taskBridgeOnly;assetFiles=$taskAssets.Count;assetRawIdentical=$taskAssets.Count-$taskAssetWhitespace;assetBlankLineOnly=$taskAssetWhitespace;different=$taskDifferent.ToArray();scope='main/pages/widgets normalized text with one exact audio-only platform flag exception; assets SHA256 with one web whitespace exception; no screen parity claim'} | ConvertTo-Json
-if ($taskDifferent.Count) { throw 'Original UI/resource drift detected; review before delivery.' }
+[pscustomobject]@{
+    upstreamCommit = $taskReferenceHead
+    uiCodeFiles = $taskCode.Count
+    uiCodeIdentical = $taskEqualCode
+    assetFiles = $taskAssets.Count
+    assetsIdentical = $taskEqualAssets
+    reviewedAdaptations = $taskReviewed.ToArray()
+    unexpectedDifferences = $taskUnexpected.ToArray()
+    scope = 'Text normalized for CRLF/EOF only; binary assets SHA256. Reviewed differences require both exact content hashes. No screen or device acceptance claim.'
+} | ConvertTo-Json
+if ($taskUnexpected.Count) { throw 'Unreviewed UI/resource drift detected.' }

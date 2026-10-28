@@ -14,6 +14,7 @@ analyzer:
   exclude:
     - build/**
     - packages/** # Vendored plugin sources retain their upstream analysis policy.
+    - third_party/** # Upstream desktop plugin is not a Harmony application source.
 
 linter:
   # The lint rules applied to this project can be customized in the

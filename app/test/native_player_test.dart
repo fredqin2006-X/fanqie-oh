@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:fqapp/models/media_item.dart';
+import 'package:fqapp/services/audio_preferences.dart';
 import 'package:fqapp/services/native_player.dart';
 import 'package:fqapp/widgets/video_player_chrome.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -71,6 +72,99 @@ void main() {
       }
     });
   }
+
+  nativeTest('volume tracks successful replies in request order', (
+    tester,
+    player,
+  ) async {
+    final creation = player.create('https://example.invalid/volume.mp4', '');
+    await tester.pump();
+    await _sendEvent({'playerId': 71, 'type': 'created', 'value': 9});
+    await tester.pump();
+    await creation;
+    final gates = [Completer<void>(), Completer<void>()];
+    var writes = 0;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_methods, (call) async {
+          if (call.method == 'setVolume') await gates[writes++].future;
+          return null;
+        });
+    expect(player.volume, 1);
+    final older = player.setVolume(0.2);
+    final newer = player.setVolume(0);
+    await tester.pump();
+    gates[1].complete();
+    await tester.pump();
+    await newer;
+    expect(player.volume, 0);
+    gates[0].complete();
+    await tester.pump();
+    await older;
+    expect(player.volume, 0);
+    await expectLater(player.setVolume(double.nan), throwsArgumentError);
+    expect(player.volume, 0);
+  });
+
+  nativeTest('uncreated player cannot acknowledge a volume change', (
+    tester,
+    player,
+  ) async {
+    await expectLater(player.setVolume(0.3), throwsStateError);
+    expect(player.volume, 1);
+  });
+
+  nativeTest('failed newer volume keeps the last native acknowledgement', (
+    tester,
+    player,
+  ) async {
+    final creation = player.create('https://example.invalid/volume.mp4', '');
+    await tester.pump();
+    await _sendEvent({'playerId': 71, 'type': 'created', 'value': 9});
+    await tester.pump();
+    await creation;
+    final gate = Completer<void>();
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_methods, (call) async {
+          if (call.method == 'setVolume') {
+            if (call.arguments['volume'] == 0.8) {
+              throw PlatformException(code: 'PLAYER_OPERATION_FAILED');
+            }
+            await gate.future;
+          }
+          return null;
+        });
+    final accepted = player.setVolume(0.3);
+    await expectLater(player.setVolume(0.8), throwsA(isA<PlatformException>()));
+    expect(player.volume, 1);
+    gate.complete();
+    await tester.pump();
+    await accepted;
+    expect(player.volume, 0.3);
+  });
+
+  nativeTest('disposal invalidates pending volume acknowledgements', (
+    tester,
+    player,
+  ) async {
+    final creation = player.create('https://example.invalid/volume.mp4', '');
+    await tester.pump();
+    await _sendEvent({'playerId': 71, 'type': 'created', 'value': 9});
+    await tester.pump();
+    await creation;
+    final gate = Completer<void>();
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_methods, (call) async {
+          if (call.method == 'setVolume') await gate.future;
+          return null;
+        });
+    final pending = player.setVolume(0.2);
+    await tester.pump();
+    await player.dispose();
+    gate.complete();
+    await tester.pump();
+    await pending;
+    expect(player.volume, 1);
+  });
 
   nativeTest(
     'disposing before the create reply safely releases its late native id once',
@@ -456,6 +550,56 @@ void main() {
       expect(player.textureId, 12);
     },
   );
+
+  // issue #129：变速引擎只对听书（纯音频）播放器下发，否则原生侧会给视频
+  // 也打开 AudioTrack 变速，画面与声音不再步进同一套计时。
+  testWidgets('audio players request the platform rate engine on create', (
+    tester,
+  ) async {
+    AudioPreferences.instance.resetForTest();
+    final player = NativePlayer(audioOnly: true);
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(_eventMethods, (_) async => null);
+    messenger.setMockMethodCallHandler(_methods, (call) async {
+      calls.add(call);
+      return call.method == 'create' ? {'playerId': 71} : null;
+    });
+    try {
+      final creation = player.create('https://example.invalid/listen.mp3', '');
+      await tester.pump();
+      await _sendEvent({'playerId': 71, 'type': 'created', 'value': 9});
+      await tester.pump();
+      expect(await creation, 9);
+      final arguments = calls
+          .firstWhere((call) => call.method == 'create')
+          .arguments
+          as Map<Object?, Object?>;
+      expect(arguments['audioOnly'], true);
+      expect(arguments['audioRateEngine'], 'wsola');
+    } finally {
+      await player.dispose();
+      await tester.pump();
+      await messenger.handlePlatformMessage(_eventMethods.name, null, (_) {});
+      await tester.pump(const Duration(seconds: 31));
+      messenger.setMockMethodCallHandler(_methods, null);
+      messenger.setMockMethodCallHandler(_eventMethods, null);
+      AudioPreferences.instance.resetForTest();
+    }
+  });
+
+  // 视频播放器不带这两个键：老客户端的 create 参数与视频变速行为都不变。
+  nativeTest('video players never send the audio rate engine', (
+    tester,
+    player,
+  ) async {
+    await _createPlayer(tester, player);
+    final arguments =
+        calls.firstWhere((call) => call.method == 'create').arguments
+            as Map<Object?, Object?>;
+    expect(arguments.containsKey('audioOnly'), false);
+    expect(arguments.containsKey('audioRateEngine'), false);
+  });
 }
 
 Future<void> _createPlayer(WidgetTester tester, NativePlayer player) async {

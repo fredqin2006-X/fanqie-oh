@@ -1,0 +1,22 @@
+{
+  "synchronizedOn": "2026-10-28",
+  "timezone": "Asia/Shanghai",
+  "repository": "https://github.com/ch6vip/fqapp",
+  "branch": "master",
+  "commit": "43b20ba40d91d98322f29344847788ac54a15971",
+  "commitTime": "2026-10-28T19:16:14+08:00",
+  "subject": "ci: 头像墙自动更新工作流（推送/每周/手动触发，变更才提交）",
+  "applicationVersion": "1.0.133+138",
+  "referenceDirectory": "fqapp-source-code-android/fqapp-master",
+  "fileCount": 874,
+  "sha256MatchedFiles": 874,
+  "missingFiles": [],
+  "extraFiles": [],
+  "mismatchedFiles": [],
+  "obsoleteFilesRemoved": 18,
+  "backupCreated": false,
+  "originalPortBaseline": "5938f25dab2015f502ded1f2079ec2a51b8b4bc6",
+  "commitsSincePortBaseline": 261,
+  "validation": "Compared every reference file with a clean checkout of the pinned upstream commit using SHA-256 and compared complete file inventories. The Android reference remains excluded from the HarmonyOS repository.",
+  "scope": "Reference synchronization and source audit only; this does not mean all upstream changes were imported into app/. No Android build or device validation was performed."
+}

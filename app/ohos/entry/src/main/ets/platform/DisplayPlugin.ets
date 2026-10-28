@@ -3,6 +3,7 @@ import { FlutterPlugin, FlutterPluginBinding, MethodCall, MethodCallHandler, Met
 import { common } from '@kit.AbilityKit';
 import { window } from '@kit.ArkUI';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { settings } from '@kit.BasicServicesKit';
 
 // Physical pixels, relative to the current window. Flutter converts using its
 // own view density so split-window and rotation updates use the same units.
@@ -14,6 +15,17 @@ export class DisplayPlugin implements FlutterPlugin, MethodCallHandler, StreamHa
   private win: window.Window | null = null;
   private originalOrientation: window.Orientation | null = null;
   private active: boolean = true;
+  private brightnessSession: string = '';
+  private brightnessWindow: window.Window | null = null;
+  private originalBrightness: number | null = null;
+  private brightnessQueue: Promise<void> = Promise.resolve();
+  private windowChanged = (event: window.WindowEventType): void => {
+    if (event !== window.WindowEventType.WINDOW_HIDDEN) { return; }
+    const session = this.brightnessSession;
+    this.brightnessQueue = this.brightnessQueue.then(async () => {
+      if (session === this.brightnessSession) { await this.finishBrightness(); }
+    }).catch(() => {});
+  };
   private avoided = (_event: window.AvoidAreaOptions): void => { this.publish(); };
   private resized = (_size: window.Size): void => { this.publish(); };
   constructor(context: common.UIAbilityContext) { this.context = context; }
@@ -26,6 +38,7 @@ export class DisplayPlugin implements FlutterPlugin, MethodCallHandler, StreamHa
   }
   onDetachedFromEngine(_binding: FlutterPluginBinding): void {
     this.active = false; this.stop();
+    this.brightnessQueue = this.brightnessQueue.then(() => this.finishBrightness(true)).catch(() => {});
     this.method?.setMethodCallHandler(null); this.channel?.setStreamHandler(null);
   }
   onListen(_args: Object, sink: EventSink): void {
@@ -95,7 +108,75 @@ export class DisplayPlugin implements FlutterPlugin, MethodCallHandler, StreamHa
     hilog.info(0x0000, 'FqDisplay', 'orientation accepted %{public}d', win.getPreferredOrientation());
     this.originalOrientation = original;
   }
+  private async beginBrightness(session: string): Promise<number> {
+    if (!this.active) { throw new Error('DETACHED'); }
+    if (session !== this.brightnessSession) {
+      await this.finishBrightness();
+      const win = await window.getLastWindow(this.context);
+      this.originalBrightness = win.getWindowProperties().brightness;
+      this.brightnessWindow = win;
+      this.brightnessSession = session;
+      win.on('windowEvent', this.windowChanged);
+    }
+    const level = this.brightnessWindow?.getWindowProperties().brightness ?? -1;
+    if (level >= 0) { return Math.max(0.02, Math.min(1, level)); }
+    // The window reports -1 while following the system. Read, but never write,
+    // the system setting to avoid jumping from a hard-coded level on first drag.
+    try {
+      const raw = await settings.getValue(this.context, settings.display.SCREEN_BRIGHTNESS_STATUS);
+      if (raw && raw.trim().length > 0) {
+        const value = Number(raw);
+        if (Number.isFinite(value) && value >= 0 && value <= 255) {
+          return Math.max(0.02, value / 255);
+        }
+      }
+    } catch (_) {}
+    return 0.5;
+  }
+  private async finishBrightness(detaching: boolean = false): Promise<void> {
+    const win = this.brightnessWindow;
+    try {
+      if (win && this.originalBrightness !== null) {
+        await win.setWindowBrightness(this.originalBrightness);
+      }
+    } catch (error) {
+      // Retry restoration on the next end/begin while the engine is attached.
+      if (!detaching) { throw error as Error; }
+    }
+    try {
+      win?.off('windowEvent', this.windowChanged);
+    } finally {
+      this.brightnessSession = '';
+      this.brightnessWindow = null;
+      this.originalBrightness = null;
+    }
+  }
+  private brightnessCall(call: MethodCall, result: MethodResult): void {
+    this.brightnessQueue = this.brightnessQueue.then(async () => {
+      try {
+        const session = call.argument('session') as string;
+        if (typeof session !== 'string' || !session || session.length > 128) { throw new Error('SESSION'); }
+        if (call.method === 'beginPlayerBrightness') {
+          result.success(await this.beginBrightness(session)); return;
+        }
+        if (session !== this.brightnessSession || !this.brightnessWindow) {
+          result.success(call.method === 'setPlayerBrightness' ? false : null); return;
+        }
+        if (call.method === 'endPlayerBrightness') {
+          await this.finishBrightness(); result.success(null); return;
+        }
+        const value = call.argument('brightness') as number;
+        if (!Number.isFinite(value) || value < 0.02 || value > 1) { throw new Error('BRIGHTNESS'); }
+        await this.brightnessWindow.setWindowBrightness(value);
+        result.success(true);
+      } catch (_) { result.error('PLAYER_BRIGHTNESS_FAILED', '播放亮度设置未能完成', null); }
+    });
+  }
   onMethodCall(call: MethodCall, result: MethodResult): void {
+    if (call.method === 'beginPlayerBrightness' || call.method === 'setPlayerBrightness' ||
+      call.method === 'endPlayerBrightness') {
+      this.brightnessCall(call, result); return;
+    }
     if (call.method === 'setOrientation') {
       this.setOrientation(call.argument('orientation') as string).then(() => result.success(null))
         .catch(() => {

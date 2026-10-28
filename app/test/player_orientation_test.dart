@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -83,38 +85,51 @@ void main() {
     await second.dispose();
   });
 
-  testWidgets('the real orientation is applied once the size arrives', (
+  testWidgets(
+    'an unknown size pins landscape and a late size changes nothing',
+    (tester) async {
+      final orientations = _OrientationLog()..install(tester);
+      // Starts unknown, exactly like a player created for the next episode.
+      final player = FakeNativePlayer(width: 0, height: 0);
+
+      await tester.pumpWidget(_app(player));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('全屏'));
+      await tester.pumpAndSettle();
+      // 尺寸未知也直接请求横屏：官方全屏是独立横屏 Activity，不按片源尺寸决定。
+      expect(orientations.last, isNotNull);
+      expect(
+        orientations.last!.every(
+          (value) => value.startsWith('DeviceOrientation.landscape'),
+        ),
+        isTrue,
+      );
+      expect(orientations.requests.length, 1);
+
+      // 尺寸到达后方向不再变化（没有第二次请求）。
+      player.width = 1920;
+      player.height = 1080;
+      await tester.pumpWidget(_app(player));
+      await tester.pumpAndSettle();
+      expect(orientations.requests.length, 1);
+      expect(
+        orientations.last!.every(
+          (value) => value.startsWith('DeviceOrientation.landscape'),
+        ),
+        isTrue,
+      );
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      await player.dispose();
+    },
+  );
+
+  testWidgets('a portrait video still goes fullscreen in landscape (#59)', (
     tester,
   ) async {
-    final orientations = _OrientationLog()..install(tester);
-    // Starts unknown, exactly like a player created for the next episode.
-    final player = FakeNativePlayer(width: 0, height: 0);
-
-    await tester.pumpWidget(_app(player));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('全屏'));
-    await tester.pumpAndSettle();
-    // Nothing pinned yet: the device keeps whatever it is using.
-    expect(orientations.last, isNull);
-
-    // The size arrives; fullscreen must adopt the video's orientation.
-    player.width = 1920;
-    player.height = 1080;
-    await tester.pumpWidget(_app(player));
-    await tester.pumpAndSettle();
-    expect(orientations.last, isNotNull);
-    expect(
-      orientations.last!.every(
-        (value) => value.startsWith('DeviceOrientation.landscape'),
-      ),
-      isTrue,
-    );
-
-    await tester.pumpWidget(const SizedBox.shrink());
-    await player.dispose();
-  });
-
-  testWidgets('a portrait video pins portrait', (tester) async {
+    // 官方 `ShortSeriesLandActivity` 的 manifest 是 `userLandscape`：竖版片源
+    // 点「全屏观看」也横过来。见
+    // .agents/notes/implemented/bug-fix/2026-10-19-fullscreen-landscape-alignment.md
     final orientations = _OrientationLog()..install(tester);
     final player = FakeNativePlayer(width: 1080, height: 1920);
 
@@ -122,7 +137,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('全屏'));
     await tester.pumpAndSettle();
-    expect(orientations.pinnedPortraitOnly, isTrue);
+    expect(orientations.last, ['DeviceOrientation.landscapeLeft']);
 
     await tester.pumpWidget(const SizedBox.shrink());
     await player.dispose();
@@ -136,7 +151,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('全屏'));
     await tester.pumpAndSettle();
-    await tester.binding.handlePopRoute();
+    await tester.tap(find.byTooltip('退出全屏'));
     await tester.pumpAndSettle();
     // An empty list means "follow the device again".
     expect(orientations.last, isEmpty);
@@ -145,9 +160,74 @@ void main() {
     await player.dispose();
   });
 
+  testWidgets('back leaves fullscreen and pins the window to portrait', (
+    tester,
+  ) async {
+    // 返回键的语义是「退出横屏、回到原来的竖屏页」。只放开朝向的话，仍横握
+    // 的设备会立刻转回横屏，看起来像「按返回反而进了横屏选集」。
+    final orientations = _OrientationLog()..install(tester);
+    final player = FakeNativePlayer(width: 1920, height: 1080);
+
+    await tester.pumpWidget(_app(player));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('全屏'));
+    await tester.pumpAndSettle();
+    expect(orientations.pinnedPortraitOnly, isFalse);
+
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(orientations.last, ['DeviceOrientation.portraitUp']);
+
+    // 退出播放页要放开这把竖屏锁，后面的页面不能跟着被锁住。
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    expect(orientations.last, isEmpty);
+    await player.dispose();
+  });
+
+  testWidgets('pushing another route suspends the portrait pin', (
+    tester,
+  ) async {
+    // 竖屏钉是引擎级的：不随路由释放的话，从分屏面板 push 的详情 / 听剧页
+    // 会一直被锁在竖屏，直到播放页被 pop。
+    final orientations = _OrientationLog()..install(tester);
+    final player = FakeNativePlayer(width: 1920, height: 1080);
+
+    await tester.pumpWidget(_app(player));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('全屏'));
+    await tester.pumpAndSettle();
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(orientations.last, ['DeviceOrientation.portraitUp']);
+
+    final navigator = Navigator.of(
+      tester.element(find.byType(VideoPlayerChrome)),
+    );
+    unawaited(
+      navigator.push<void>(
+        MaterialPageRoute<void>(
+          builder: (_) => const Scaffold(body: Text('详情')),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('详情'), findsOneWidget);
+    expect(orientations.last, isEmpty);
+
+    navigator.pop();
+    await tester.pumpAndSettle();
+    expect(orientations.last, ['DeviceOrientation.portraitUp']);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    expect(orientations.last, isEmpty);
+    await player.dispose();
+  });
+
   for (final unknownSize in [true, false]) {
     testWidgets(
-      'manual landscape overrides ${unknownSize ? 'unknown' : 'portrait'} size until back',
+      'fullscreen holds landscape for ${unknownSize ? 'unknown' : 'portrait'} size until back',
       (tester) async {
         final orientations = _OrientationLog()..install(tester);
         final player = FakeNativePlayer(
@@ -158,19 +238,11 @@ void main() {
         addTearDown(() => tester.binding.setSurfaceSize(null));
         await tester.pumpWidget(_app(player, shortSeries: true));
         await tester.pumpAndSettle();
-        final auto = tester.getRect(
-          find.byKey(const ValueKey('player-fullscreen-pill')),
-        );
-        final force = tester.getRect(
-          find.byKey(const ValueKey('player-force-landscape')),
-        );
-        expect(auto.overlaps(force), isFalse);
-        expect(force.center.dy, auto.center.dy);
-        await tester.tap(find.byKey(const ValueKey('player-force-landscape')));
+        // Upstream now has one fullscreen action; it always requests landscape.
+        await tester.tap(find.byKey(const ValueKey('player-fullscreen-pill')));
         await tester.pumpAndSettle();
         expect(orientations.last, ['DeviceOrientation.landscapeLeft']);
         expect(find.text('强制横屏'), findsNothing);
-        expect(find.byType(IconButton), findsNothing);
 
         // Late source metadata and episode replacement cannot cancel the choice.
         player.width = 1080;
@@ -185,11 +257,11 @@ void main() {
 
         await tester.binding.handlePopRoute();
         await tester.pumpAndSettle();
-        expect(orientations.last, isEmpty);
-        // A new automatic fullscreen session must follow the source again.
+        expect(orientations.last, ['DeviceOrientation.portraitUp']);
+        // A new fullscreen session still requests landscape for portrait media.
         await tester.tap(find.byKey(const ValueKey('player-fullscreen-pill')));
         await tester.pumpAndSettle();
-        expect(orientations.last, ['DeviceOrientation.portraitUp']);
+        expect(orientations.last, ['DeviceOrientation.landscapeLeft']);
         await tester.pumpWidget(const SizedBox.shrink());
         await player.dispose();
         await next.dispose();
@@ -210,8 +282,10 @@ void main() {
       expect(orientations.last, ['DeviceOrientation.landscapeLeft']);
       await tester.binding.handlePopRoute();
       await tester.pumpAndSettle();
-      expect(orientations.last, isEmpty);
+      expect(orientations.last, ['DeviceOrientation.portraitUp']);
       await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+      expect(orientations.last, isEmpty);
       await player.dispose();
     },
   );

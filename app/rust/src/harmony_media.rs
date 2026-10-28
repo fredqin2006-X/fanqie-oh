@@ -111,6 +111,41 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_sources_stay_inside_the_canonical_sandbox() {
+        let root = temp_root();
+        let sandbox = root.join("app");
+        std::fs::create_dir(&sandbox).unwrap();
+        let inside = sandbox.join("sample.bin");
+        let outside = root.join("outside.bin");
+        std::fs::write(&inside, CENC).unwrap();
+        std::fs::write(&outside, CENC).unwrap();
+        let manager = MediaManager::new(sandbox.clone()).unwrap();
+        for path in [&outside, &sandbox.join("../outside.bin")] {
+            for url in [
+                path.to_string_lossy().into_owned(),
+                url::Url::from_file_path(path).unwrap().to_string(),
+            ] {
+                assert!(manager
+                    .open(OpenSource {
+                        url,
+                        key_hex: "00112233445566778899aabbccddeeff".into(),
+                    })
+                    .await
+                    .is_err());
+            }
+        }
+        assert!(manager
+            .open(OpenSource {
+                url: url::Url::from_file_path(&inside).unwrap().to_string(),
+                key_hex: "00112233445566778899aabbccddeeff".into(),
+            })
+            .await
+            .is_ok());
+        drop(manager);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     async fn remote_fixture(ignore_range: bool) -> (String, tokio::task::JoinHandle<()>) {
         use axum::routing::get;
         let app = axum::Router::new().route(

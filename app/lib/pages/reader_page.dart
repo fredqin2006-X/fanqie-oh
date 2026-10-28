@@ -1,3 +1,6 @@
+import 'package:flutter/gestures.dart';
+import '../services/desktop_platform.dart';
+import '../widgets/desktop_chapter_sidebar.dart';
 import 'dart:async';
 import 'dart:collection';
 import 'package:flutter/material.dart';
@@ -7,23 +10,35 @@ import 'package:flutter_lucide/flutter_lucide.dart';
 import '../models/book_comment.dart';
 import '../platform/display_safe_area.dart';
 import '../models/chapter_ideas.dart';
+import '../models/audio_extra.dart';
+import '../models/comment_reply.dart';
 import '../models/media_item.dart';
 import '../services/api_client.dart';
 import '../services/app_theme.dart';
 import '../services/backend_transport.dart';
 import '../services/chapter_cache_store.dart';
 import '../services/chapter_text_formatter.dart';
+import '../services/text_replacement_engine.dart';
+import '../services/text_replacement_store.dart';
 import '../services/library_store.dart';
 import '../services/listening_session.dart';
 import '../services/reader_device.dart';
+import '../widgets/reader/eink_reading.dart';
+import '../services/eink_refresh.dart';
+import '../services/fair_memory.dart';
+import '../services/volume_key.dart';
 import '../services/reader_history.dart';
 import '../services/reader_preferences.dart';
+import '../services/reader_tap_zones.dart';
 import '../services/reader_underline_store.dart';
+import '../services/shelf_toggle.dart';
+import '../services/shelf_store.dart';
 import '../services/system_tts.dart';
 import '../widgets/chapter_cache_sheet.dart';
 import '../widgets/reader/reader_appearance_sheet.dart';
 import '../widgets/reader/reader_bubble.dart';
 import '../widgets/reader/reader_chapter_layout.dart';
+import '../widgets/reader/cue_index.dart';
 import '../widgets/reader/reader_controls.dart';
 import '../widgets/reader/reader_cutout_insets.dart';
 import '../widgets/reader/reader_illustration.dart';
@@ -34,6 +49,7 @@ import '../widgets/reader/reader_status_bar.dart';
 import '../widgets/reader/reader_text_selection.dart';
 import '../widgets/reader/reader_theme.dart';
 import 'audio_page.dart';
+import 'text_replacement_page.dart';
 
 typedef ChapterTextLoader = Future<String> Function(Chapter chapter);
 typedef _LoadedChapter = ({String text, bool fetched});
@@ -50,6 +66,13 @@ typedef ParagraphCommentResolver =
       String? cursor,
     );
 
+/// 朗读句高亮的底色要不要画。
+///
+/// 用户要求单独验证「双击 / 中键跳到那一段」这件事，先把暖黄底色关掉：
+/// 底色会盖住正文，也容易让人把"跳转生效"误认成"高亮亮了"。关掉之后
+/// 跳转链路（字幕 → 时间 → seek）完全不变，见 `_seekToTappedSentence`。
+const bool kReaderHighlightWash = false;
+
 class ReaderPage extends StatefulWidget {
   final String bookId;
   final String title;
@@ -65,6 +88,8 @@ class ReaderPage extends StatefulWidget {
 
   /// Local 划线 storage. Defaults to the device-wide box.
   final ReaderUnderlineStore? underlineStore;
+  final TextReplacementStore? replacementStore;
+  final TextReplacementEngine? replacementEngine;
 
   /// Paragraph ideas for the current chapter. When both this and
   /// [commentResolver] are null the reader fetches them itself, unless a
@@ -74,6 +99,10 @@ class ReaderPage extends StatefulWidget {
 
   /// Resolves one paragraph's comment bodies. See [ParagraphCommentResolver].
   final ParagraphCommentResolver? commentResolver;
+
+  /// 加入书架时用的条目（issue #103）。详情页传入原 `MediaItem`，书架卡片因此
+  /// 保留作者/徽标等字段；其他入口省略，按 [bookId]/[title]/[cover] 兜底成小说。
+  final MediaItem? shelfItem;
 
   const ReaderPage({
     super.key,
@@ -90,7 +119,10 @@ class ReaderPage extends StatefulWidget {
     this.imageProviderFactory,
     this.ideasLoader,
     this.commentResolver,
+    this.shelfItem,
     this.underlineStore,
+    this.replacementStore,
+    this.replacementEngine,
   });
 
   @override
@@ -103,6 +135,9 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
   late int _index;
   final ScrollController _scrollController = ScrollController();
   Timer? _saveTimer;
+  // 小米公平运行内存 KILL 广播的刷盘注销函数：dispose 时注销，避免 KILL
+  // 到达时调用已 dispose 页面的保存。
+  VoidCallback? _unregisterFairMemoryFlush;
 
   /// 滚动模式下拖过边界的累计量：超过阈值才触发连续阅读跨章，避免轻微
   /// 回弹误触（与分页视图的 32px 边界阈值一致）。带符号：拖过底部为正，
@@ -115,6 +150,104 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
 
   String _content = '';
   ChapterContent _chapterContent = ChapterContent(blocks: const []);
+  TextReplacementResult? _replacement;
+  TextReplacementCancellation? _replacementCancellation;
+  int _replacementGeneration = 0;
+  TextReplacementStore get _replacementStore =>
+      widget.replacementStore ?? TextReplacementStore.instance;
+
+  Future<TextReplacementResult> _replaceContent(
+    ChapterContent content,
+    String title,
+  ) async {
+    _replacementCancellation?.cancel();
+    final cancellation = _replacementCancellation =
+        TextReplacementCancellation();
+    await _replacementStore.load();
+    while (true) {
+      final snapshot = _replacementStore.snapshot;
+      final result =
+          await (widget.replacementEngine ?? TextReplacementEngine.instance)
+              .transform(
+                source: content,
+                chapterTitle: title,
+                snapshot: snapshot,
+                cancellation: cancellation,
+              );
+      if (cancellation.cancelled ||
+          snapshot.revision == _replacementStore.snapshot.revision) {
+        return result;
+      }
+    }
+  }
+
+  Future<void> _onReplacementChanged() async {
+    if (!mounted || _loading || _error != null) return;
+    final generation = ++_replacementGeneration;
+    final loadGeneration = _loadGeneration;
+    final chapter = _chapter;
+    _captureScrollProgress();
+    final text = _chapterCache[chapter.itemId] ?? _content;
+    final content = text == _content
+        ? _chapterContent
+        : ChapterContent.fromCacheText(text);
+    final legacyRefresh = text != _content && !_chapterContent.hasImages;
+    final position = _needsRestore
+        ? _savedPosition
+        : <String, dynamic>{
+            'chapterId': chapter.itemId,
+            'positionVersion': legacyRefresh ? 1 : 2,
+            'textOffset': legacyRefresh
+                ? _chapterLayout?.legacyOffsetForText(_textOffset) ??
+                      _textOffset
+                : _chapterLayout?.sourceOffsetForDisplay(_textOffset) ??
+                      _textOffset,
+          };
+    final result = await _replaceContent(content, chapter.title);
+    if (!mounted ||
+        generation != _replacementGeneration ||
+        loadGeneration != _loadGeneration) {
+      return;
+    }
+    setState(() {
+      _content = text;
+      _chapterContent = content;
+      _replacement = result;
+      _savedPosition = position;
+      _narrationRange = null;
+      _selection = null;
+      _selectionBarOpen = false;
+      _chapterLayout = null;
+      _needsRestore = true;
+      _progressReady = false;
+    });
+    if (result.error != null) _showMessage('本章替换失败，已显示原文：${result.error}');
+  }
+
+  List<ReaderRangeUnderline> get _displayRangeUnderlines {
+    final layout = _chapterLayout;
+    if (layout == null || _replacement == null) return _rangeUnderlines;
+    return [
+      for (final mark in _rangeUnderlines)
+        if (layout.displayOffsetForSource(
+              mark.end,
+              bias: TextBoundaryBias.end,
+            ) >
+            layout.displayOffsetForSource(mark.start))
+          ReaderRangeUnderline(
+            bookId: mark.bookId,
+            chapterId: mark.chapterId,
+            start: layout.displayOffsetForSource(mark.start),
+            end: layout.displayOffsetForSource(
+              mark.end,
+              bias: TextBoundaryBias.end,
+            ),
+            text: mark.text,
+            createdAt: mark.createdAt,
+          ),
+    ];
+  }
+
   ChapterIdeas _ideas = ChapterIdeas.empty;
   bool _loading = true;
   bool _progressReady = false;
@@ -132,36 +265,86 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
 
   bool get _paged => _preferences.pageMode == ReaderPageMode.paged;
 
+  /// 阅读器自己的书架条目（issue #103）：详情页传了原 item 就用它，否则按本页
+  /// 已有的书籍字段兜底。书架 key 是 `kind:id`，这里固定 'book'——漫画走自己的
+  /// 阅读器（kind 'manga'），两者在书架上本就是两条。
+  MediaItem get _shelfEntry =>
+      widget.shelfItem ??
+      MediaItem(
+        id: widget.bookId,
+        title: widget.title,
+        cover: widget.cover,
+        author: '',
+        badge: '',
+        ep: '',
+        kind: 'book',
+      );
+
   /// 全局墨水屏模式覆盖阅读器显示预设（#15/#9）：开启时阅读器强制纯黑白，
   /// 不改用户保存的预设，关闭后恢复原预设。夜间切换等仍写保存的预设。
-  ReaderThemePreset get _effectivePreset => einkModeNotifier.value
-      ? ReaderThemePreset.eink
-      : _preferences.themePreset;
+  ///
+  /// 全局 OLED 纯黑同理：只在深色外观下生效，所以阅读背景强制到夜间预设
+  ///（颜色再由 [ReaderThemeColors.isOled] 降到 #000000），退出深色后回到
+  /// 原预设。
+  ReaderThemePreset get _effectivePreset {
+    if (einkModeNotifier.value) return ReaderThemePreset.eink;
+    if (oledActive()) return ReaderThemePreset.dark;
+    return _preferences.themePreset;
+  }
 
-  bool _handleVolumeKey(KeyEvent event) {
+  /// 排版用的偏好：墨水屏模式下把预设换成 eink，正文/标题才是 #000000。
+  ///
+  /// 页面背景早就走 [_effectivePreset]，但 [ReaderLayoutSpec] 的正文、标题
+  /// 颜色和 [ReaderControls] 自己的读色都取自这里传入的 preferences。之前
+  /// 两处直接传 [_preferences]，于是全局墨水屏开启后正文仍用用户保存预设的
+  /// textColor（默认米白 #292724）——实测设备上正文主色 RGB(41,39,36)，
+  /// 墨水屏把它量化成明显发灰的一档。保存的预设不动，关闭墨水屏即恢复。
+  ReaderPreferences get _displayPreferences {
+    if (einkModeNotifier.value) {
+      return _preferences.copyWith(
+        themePreset: ReaderThemePreset.eink,
+        // 墨水屏最低 500 字重：Flutter 没有关亚像素抗锯齿的 API，
+        // 加粗是唯一能用的笔画加深手段。
+        fontWeight: einkEffectiveFontWeight(
+          eink: true,
+          fontWeight: _preferences.fontWeight,
+        ),
+      );
+    }
+    // OLED：正文 / 标题颜色同样要走夜间，否则排版层会继续用保存预设的浅色
+    // 纸面正文色，在纯黑底上既刺眼又和背景对不上。
+    if (oledActive()) {
+      return _preferences.copyWith(themePreset: ReaderThemePreset.dark);
+    }
+    return _preferences;
+  }
+
+  /// 原生层（MainActivity.dispatchKeyEvent）拦截到音量键后回调：仅在阅读页
+  /// 当前路由、未显示控制栏、已开启音量键翻页、且为分页模式时翻页。
+  void _onVolumeKey(int direction) {
     if (!mounted ||
-        !_appActive ||
-        ModalRoute.of(context)?.isCurrent != true ||
+        !_routeCurrent ||
+        _controlsVisible ||
         !_preferences.volumeKeyTurn ||
-        _controlsVisible) {
-      return false;
+        !_paged) {
+      return;
     }
-    if (event is! KeyDownEvent && event is! KeyRepeatEvent) return false;
-    if (_paged) {
-      if (event.logicalKey == LogicalKeyboardKey.audioVolumeDown) {
-        _pauseListenFollow();
-        _stopAutoTurn();
-        unawaited(_turnPage(1));
-        return true;
-      }
-      if (event.logicalKey == LogicalKeyboardKey.audioVolumeUp) {
-        _pauseListenFollow();
-        _stopAutoTurn();
-        unawaited(_turnPage(-1));
-        return true;
-      }
-    }
-    return false;
+    _pauseListenFollow();
+    _stopAutoTurn();
+    unawaited(_turnPage(direction));
+  }
+
+  /// 根据当前状态同步原生是否拦截音量键：仅当阅读页是当前路由、未显示控制栏、
+  /// 已开启音量键翻页、且为分页模式时启用。其余情况放行系统音量。
+  void _syncVolumeKeyEnabled() {
+    unawaited(
+      VolumeKeyService.instance.setEnabled(
+        _routeCurrent &&
+            _preferences.volumeKeyTurn &&
+            !_controlsVisible &&
+            _paged,
+      ),
+    );
   }
 
   void _toggleAutoTurn() {
@@ -193,15 +376,229 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
 
   void _pauseListenFollow() {
     _listenFollowPausedUntil = DateTime.now().add(const Duration(seconds: 15));
+    // 用户自己翻页 = 不想被拽回去，直接退出跟随（图标变回空心）。以前只
+    // 暂停 15 秒，按钮还显示「跟随中」，看着像坏了。
+    ListeningSession.instance.setFollowArmed(false);
+  }
+
+  /// 朗读句高亮：与跟随翻页独立同步，跟随关闭时高亮仍可显示；暂停、
+  /// 切章或未在读本章时清空。
+  (int, int)? _narrationRange;
+
+  /// 双击跳读是否可用：正在听这本书就行，本章或别的章都可以（跨章跳）。
+  ///
+  /// 单独存一份是因为它得跟着会话变，而高亮没变化时不会触发重建。
+  bool _doubleTapArmed = false;
+
+  /// 10Hz 跟随轮询。见 [_followPollTick]。
+  Timer? _followPoll;
+
+  bool get _listenDoubleTapArmed =>
+      _narrationRange != null ||
+      ListeningSession.instance.bookId == widget.bookId;
+
+  /// 「正文字符位置 ↔ 音频时间」对照表，句高亮 / 跟随翻页 / 双击跳读共用。
+  ///
+  /// 排版（换字号、换分页方式）或字幕轨换了才重建；两者都用 identical 判断，
+  /// 日常 tick 不会重建。
+  CueIndex _cueIndex = CueIndex.empty;
+  Object? _cueIndexLayout;
+  SubtitleTrack? _cueIndexTrack;
+
+  /// 非当前播放章的字幕轨，键 = 章节 id。
+  ///
+  /// 会话里只存在正在播那一章的轨。停在别的章时双击跳读要先有本章字幕，
+  /// 所以按章补取一次留着，翻回来不用再请求。
+  final _cueTracks = <String, SubtitleTrack>{};
+  final _cueTrackRequests = <String, Future<SubtitleTrack>>{};
+
+  /// 本章该用哪条字幕轨：正在播的就是本章时用会话里的，否则用补取的。
+  SubtitleTrack? _cueTrackFor(String chapterId) {
+    final session = ListeningSession.instance;
+    if (session.chapterId == chapterId) return session.subtitles;
+    return _cueTracks[chapterId];
+  }
+
+  void _ensureCueIndex(ReaderChapterLayout layout) {
+    final track = _cueTrackFor(_chapter.itemId);
+    if (identical(_cueIndexLayout, layout) && identical(_cueIndexTrack, track)) {
+      return;
+    }
+    _cueIndexLayout = layout;
+    _cueIndexTrack = track;
+    _cueIndex = track == null || track.isEmpty
+        ? CueIndex.empty
+        : CueIndex.build(layout: layout, track: track);
+  }
+
+  /// 取本章字幕，取到就缓存。跨章跳读用；同章直接返回会话里的那条。
+  Future<SubtitleTrack?> _fetchCueTrack() async {
+    final chapterId = _chapter.itemId;
+    final session = ListeningSession.instance;
+    if (session.chapterId == chapterId) return session.subtitles;
+    final cached = _cueTracks[chapterId];
+    if (cached != null) return cached;
+    final pending = _cueTrackRequests[chapterId];
+    if (pending != null) return pending;
+    final future = AudioPlaybackScope.timelineForChapter(context, chapterId);
+    _cueTrackRequests[chapterId] = future;
+    try {
+      final track = await future;
+      if (track.isNotEmpty) _cueTracks[chapterId] = track;
+      return track;
+    } catch (_) {
+      return null;
+    } finally {
+      _cueTrackRequests.remove(chapterId);
+    }
+  }
+
+  /// The passage being narrated, in layout coordinates, or null when this
+  /// chapter is not the one on the voice.
+  ///
+  /// Two sources, two coordinate systems. System TTS reports offsets into the
+  /// TTS text blob; 听书 reports the backend's (paragraph, offset) timeline.
+  /// Each is translated by its own mapper so neither can smear the highlight
+  /// onto the wrong paragraph.
+  (int, int)? _narrationLayoutRange(ReaderChapterLayout layout) {
+    final session = ListeningSession.instance;
+    if (!session.matches(widget.bookId, _chapter.itemId)) return null;
+    final audioRange = session.audioParaRange;
+    if (audioRange != null) {
+      final translated = audioTimePointLayoutRange(
+        layout,
+        audioRange.startPara,
+        audioRange.startOff,
+        audioRange.endPara,
+        // The upstream end offset is inclusive (official
+        // `toTargetTextBlock` passes `endParaOff + 1`); this side is
+        // half-open, so the +1 belongs here.
+        audioRange.endOff + 1,
+        startElementIndex: audioRange.elemIndex,
+        startElementOffset: audioRange.elemOff,
+      );
+      // 官方时间点译不出来时不能直接返回 null：下面那条字幕兜底本来就是为
+      // 这种章节写的（多源项章节会重置时间轴），提前返回等于把它跳过。
+      if (translated != null) return (translated.start, translated.end);
+    }
+    final ttsRange = session.sentenceRange;
+    if (ttsRange != null &&
+        session.textReplacementRevision ==
+            (_replacement?.snapshotRevision ?? 0)) {
+      final translated = narrationLayoutRange(layout, ttsRange);
+      if (translated != null) return (translated.start, translated.end);
+    }
+    // 官方时间点在多源项章节会重置时间轴（`para 0` 可能从 198 秒才开始），
+    // TTS 那条又不适用于音频朗读；这时按播放位置到字幕里查当前句。字幕是
+    // 逐句连续的，位置也对得上。
+    _ensureCueIndex(layout);
+    final span = _cueIndex.spanAtPositionMs(session.position.inMilliseconds);
+    if (span != null) return (span.start, span.end);
+    // 逐句搜索兜底：句尾落到下一页这类跨页情形索引对不上，但正文里能找到。
+    return _locateCue(layout, session.cue);
+  }
+
+  void _syncNarrationHighlight((int, int)? narration) {
+    if (!mounted) return;
+    // 还在读本章、只是这一拍没匹配上（字幕与正文偶有标点差异）时保留上一拍
+    // 的区间：清空会让整页突然变黑，观感比「晚半拍」差得多。确实不在读本章
+    // 才清。
+    final session = ListeningSession.instance;
+    final active = session.matches(widget.bookId, _chapter.itemId);
+    final held = narration ?? (active ? _narrationRange : null);
+    // The follow anchor still uses [narration] when the wash is switched off;
+    // only painting depends on the preference.
+    final next = _preferences.narrationHighlight ? held : null;
+    if (next != _narrationRange) {
+      setState(() => _narrationRange = next);
+    }
+  }
+
+  /// 字幕与正文之间的噪声字符：各类标点和空白。两边在全/半角、省略号写法
+  /// 上经常不一致，精确匹配失败后要靠剥掉这些再比一次。
+  ///
+  /// 与 [CueIndex.cueNoise] 是同一份规则 —— 对照表和这里的兜底搜索必须用同
+  /// 一套口径，否则一句在表里能对上、兜底却对不上。
+  static final _cueNoise = CueIndex.cueNoise;
+
+  /// 把字幕的当前句映射到本章正文的字符区间（布局坐标）。
+  ///
+  /// 先整句精确匹配；失败后把两边的标点空白都剥掉再匹配，并把命中位置换算
+  /// 回原串下标。两次都找不到返回 null —— 宁可这一拍没有高亮，也不留下上一
+  /// 句的错位底色。
+  (int, int)? _locateCue(ReaderChapterLayout layout, String? rawCue) {
+    final cue = rawCue?.trim();
+    if (cue == null || cue.isEmpty) return null;
+    for (var i = 1; i < layout.blocks.length; i++) {
+      final block = layout.blocks[i];
+      if (block.isImage || block.text.isEmpty) continue;
+      final at = block.text.indexOf(cue);
+      if (at >= 0) return (block.start + at, block.start + at + cue.length);
+    }
+    final needle = cue.replaceAll(_cueNoise, '');
+    if (needle.isEmpty) return null;
+    for (var i = 1; i < layout.blocks.length; i++) {
+      final block = layout.blocks[i];
+      if (block.isImage || block.text.isEmpty) continue;
+      final hit = _strippedIndex(block.text, needle);
+      if (hit != null) {
+        return (block.start + hit.start, block.start + hit.end);
+      }
+    }
+    // 跨页兜底：一句从页尾起头、后半句落到下一页时，新页里只有这句的尾巴
+    // （甚至只剩一两个字），整句匹配必然失败，高亮就整段消失。这里改用句尾
+    // 若干字逐个尝试，能对上多少就亮多少——亮一两个字也好过全页无高亮。
+    //
+    // 只看前几个块：残余部分一定落在新页开头，没必要全页扫一遍。
+    for (var take = 2; take <= 8; take++) {
+      if (take >= needle.length) break;
+      final tail = needle.substring(needle.length - take);
+      for (var i = 1; i < layout.blocks.length && i <= 3; i++) {
+        final block = layout.blocks[i];
+        if (block.isImage || block.text.isEmpty) continue;
+        final hit = _strippedIndex(block.text, tail);
+        if (hit != null) {
+          return (block.start + hit.start, block.start + hit.end);
+        }
+      }
+    }
+    return null;
+  }
+
+  /// 在 [text] 里找剥掉噪声后的 [needle]，返回原串的下标区间。
+  static ({int start, int end})? _strippedIndex(String text, String needle) {
+    final chars = <String>[];
+    final origin = <int>[];
+    for (var i = 0; i < text.length; i++) {
+      final ch = text[i];
+      if (_cueNoise.hasMatch(ch)) continue;
+      chars.add(ch);
+      origin.add(i);
+    }
+    final at = chars.join().indexOf(needle);
+    if (at < 0) return null;
+    return (start: origin[at], end: origin[at + needle.length - 1] + 1);
   }
 
   void _onListeningTick() {
-    if (!mounted ||
-        !_routeCurrent ||
+    if (!mounted) return;
+    // 双击跳读的开关跟会话走：高亮没变化时也要重建一次，否则刚开播时
+    // 手势没挂上（控制台看着「双击没反应」）。
+    final armed = _listenDoubleTapArmed;
+    if (armed != _doubleTapArmed) {
+      setState(() => _doubleTapArmed = armed);
+    }
+    final layout = _chapterLayout;
+    final narration = layout == null ? null : _narrationLayoutRange(layout);
+    _syncNarrationHighlight(narration);
+    // 翻页**只**由 [_followPollTick] 负责：它按句内插值寻址到正在读的那个
+    // 字。这条 1Hz 通知原来也翻，但锚的是句首；一句跨页时两路各拽一头，
+    // 于是就出现每秒回闪一页。这里只剩「朗读读完本章 → 跟到下一章」。
+    if (!_routeCurrent ||
         !_appActive ||
         !_preferences.listeningFollow ||
-        _autoTurnTimer != null ||
-        _controlsVisible ||
+        // 没按过定位键就是不跟随：老逻辑只认偏好，开着重播就会自己翻页。
+        !ListeningSession.instance.followArmed ||
         _loading ||
         _changingChapter ||
         _error != null) {
@@ -214,18 +611,8 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
       final next = widget.chapters.indexWhere(
         (c) => c.itemId == session.chapterId,
       );
+      // 控制栏展开 / 自动翻页中的闸门由 [_jumpToChapter] 自己再查一遍。
       if (next >= 0) unawaited(_jumpToChapter(next, followListening: true));
-      return;
-    }
-    if (!session.matches(widget.bookId, _chapter.itemId)) return;
-    final progress = session.progress;
-    if (_paged) {
-      _pagedKey.currentState?.followProgress(progress);
-    } else if (_scrollController.hasClients) {
-      final position = _scrollController.position;
-      if (position.maxScrollExtent > 0) {
-        _scrollController.jumpTo(progress * position.maxScrollExtent);
-      }
     }
   }
 
@@ -253,6 +640,24 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
   bool _appActive = true;
   bool _routeCurrent = false;
   bool _changingChapter = false;
+
+  /// 墨水屏整屏刷新计数器：每翻一页 +1，达到 [_ReaderState._einkRefreshInterval]
+  /// 阈值（来自 [_preferences.einkRefreshInterval]）就调用一次海信 EPD 全刷压残影，
+  /// 然后归零。仅在全局墨水屏模式开启时累加。
+  int _einkPageCounter = 0;
+
+  /// 墨水屏软件白闪显隐：[EinkRefreshService] 在厂商接口不可用时发请求，
+  /// 这里盖一张全屏白帧再撤掉，迫使 EPD 控制器做一次全量刷新。
+  bool _einkFlashVisible = false;
+  Timer? _einkFlashTimer;
+
+  /// 滚动模式下的墨水屏刷新累积：滚动没有“翻页”计数，改按滚动距离累积，
+  /// 每滚够约 3 屏刷一次，避免滚动模式残影只增不减。
+  double _einkScrollDistance = 0;
+  double _einkLastScrollOffset = 0;
+
+  /// 上一次已触发过切章刷新的章节 id：首章打开不闪，只有切章才刷。
+  String? _lastEinkRefreshChapterId;
 
   /// Chapter-boundary transition handed to [ReaderPagedView]; see
   /// [ReaderChapterTurn]. Set by [_next] / [_prev] and cleared once the slide
@@ -297,6 +702,11 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
   /// arrive even though the text, font and viewport are unchanged.
   int _ideasRevision = 0;
   int _layoutIdeasRevision = -1;
+
+  /// Whether the cached layout was measured with bubbles visible. Toggling
+  /// the 段评气泡 switch must re-measure: the bubble placeholders change
+  /// the text layout, so the cached layout is not reusable across a toggle.
+  bool _layoutBubblesVisible = true;
 
   /// Paragraph ids of this chapter carrying a locally saved 划线.
   Set<int> _underlines = const {};
@@ -362,15 +772,44 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
-    HardwareKeyboard.instance.addHandler(_handleVolumeKey);
+    VolumeKeyService.instance.setOnVolumeKey(_onVolumeKey);
+    _syncVolumeKeyEnabled();
     ListeningSession.instance.addListener(_onListeningTick);
+    // 双击跳读的开关只在会话通知里算，而暂停的会话永远不发通知：开书前就
+    // 已经暂停（或者从未播过）时手势得先就位。initState 里不能 setState，
+    // 直接赋值。
+    _doubleTapArmed = _listenDoubleTapArmed;
+    // 迷你栏的跟随键靠这个函数决定是否可点，而它挂在 Overlay 上、不随本页
+    // 重建；initState 正处于构建阶段，同步广播会撞上 markNeedsBuild 断言，
+    // 所以推到帧后再注册。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        ListeningSession.instance.jumpToPlaybackHandler =
+            _jumpToPlaybackPosition;
+      }
+    });
+    // 跟随用 10Hz 轮询，不走 ListeningSession 的监听（那条每秒最多通知一次，
+    // 只在结构性变化时才来，而且不管翻页）。定位键每次都准，所以轮询直接调
+    // 同一个函数。
+    _followPoll = Timer.periodic(
+      const Duration(milliseconds: 100),
+      (_) => _followPollTick(),
+    );
+    _replacementStore.changes.addListener(_onReplacementChanged);
     WidgetsBinding.instance.addObserver(this);
+    // 小米公平运行内存：KILL 广播到达时刷一次阅读进度，避免被杀丢进度。
+    _unregisterFairMemoryFlush = FairMemoryService.instance
+        .registerFlushHandler(_persistProgress);
     _appActive =
         WidgetsBinding.instance.lifecycleState == null ||
         WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
     _index = widget.chapters.isEmpty
         ? 0
         : widget.startIndex.clamp(0, widget.chapters.length - 1);
+    _lastEinkRefreshChapterId = widget.chapters.isEmpty
+        ? null
+        : widget.chapters[_index].itemId;
+    EinkRefreshService.instance.flashRequest.addListener(_onEinkFlashRequest);
     _scrollController.addListener(_onScroll);
     _preferencesFuture = _loadPreferences();
     if (widget.chapters.isEmpty) {
@@ -390,15 +829,32 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
     final current = ModalRoute.isCurrentOf(context) ?? true;
     if (_routeCurrent == current) return;
     _routeCurrent = current;
+    // The ideas sheet (#57) holds immersive while it is open. Once this
+    // route is current again the sheet is gone, so the hold is released
+    // here — the sheet's own finally runs before this notification lands
+    // (the sheet route is still present until its close animation ends),
+    // and releasing there would briefly show the status bar (one flash).
+    if (current) _ideasSheetOpen = false;
     _syncSystemBars();
+    _syncVolumeKeyEnabled();
   }
 
   // Note: Route/lifecycle ownership and SDK 36 compatibility; see
   // .agents/notes/implemented/bug-fix/2026-10-12-reader-system-bars.md.
+  // The paragraph-ideas sheet is the reader's own modal (#57): opening it
+  // pushes a route, which would otherwise flip [_routeCurrent] off and
+  // bring the status bar back. While the sheet is open the viewer is still
+  // reading, so immersive stays on; other routes still release it.
+  bool _ideasSheetOpen = false;
+
   void _syncSystemBars() {
+    if (!_preferencesReady) return;
     unawaited(
       _device.setImmersive(
-        _appActive && _routeCurrent && widget.chapters.isNotEmpty,
+        _appActive &&
+            (_routeCurrent || _ideasSheetOpen) &&
+            widget.chapters.isNotEmpty,
+        showStatusBar: _preferences.showSystemStatusBar,
       ),
     );
   }
@@ -418,6 +874,8 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
         _dayTheme = preferences.themePreset;
       }
     });
+    _syncSystemBars();
+    _syncVolumeKeyEnabled();
     await _loadFont(preferences.fontPath);
     if (mounted && _appActive) unawaited(_refreshDevice());
   }
@@ -505,6 +963,166 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
   /// press do literally nothing on those chapters.
   ///
   /// Note: .agents/notes/implemented/feature/2026-09-18-reader-paragraph-actions.md
+  /// 迷你听书栏的「跳到播放位置」：把页面跳到正在读的那一句。
+  ///
+  /// 与跟随走同一条寻址链（对照表 → 句内插值 → 第几页），区别只是它是用户
+  /// 主动按的，所以不受「跟随开关」和「用户接管闩锁」限制。
+  /// 10Hz 跟随轮询：正在听本章、且用户没在主动翻页时，把页面挪到正在读的字。
+  ///
+  /// 走 [_addressToPlayback]，与迷你栏的定位键**同一段代码**。闸门只留「什么
+  /// 时候不该抢」那几条：跟随关着、工具条展开、自动翻页进行中、用户刚手动
+  /// 翻过页。
+  void _followPollTick() {
+    if (!mounted || !_routeCurrent || !_appActive) return;
+    // 跟随开关由迷你栏那个按钮管：关着就是自由翻页，什么都不做。
+    if (!ListeningSession.instance.followArmed) return;
+    // 设置里的「跟随翻页」是总闸，关掉就永不跟。
+    if (!_preferences.listeningFollow) return;
+    // 工具条展开时不翻页（用户正在操作页面），自动翻页进行时也不抢。
+    if (_controlsVisible || _autoTurnTimer != null) return;
+    final session = ListeningSession.instance;
+    if (!session.playing) return;
+    if (session.bookId != widget.bookId) return;
+    if (_loading || _changingChapter || _error != null) return;
+    // 用户刚手动翻过页：15 秒内不抢，之后再跟上。这一条必须在「换章」分支
+    // 前面 —— 否则被闩锁挡住的那次切章每 100ms 还会走一遍结算+存盘。
+    if (DateTime.now().isBefore(_listenFollowPausedUntil)) return;
+    // 朗读已经读完本章、进了下一章：跟随就该把页面带过去。原来这里直接
+    // return，于是跟着跟着停在旧章不动了（用户报的「读完一章不翻章」）。
+    if (session.chapterId != _chapter.itemId) {
+      final next = widget.chapters.indexWhere(
+        (c) => c.itemId == session.chapterId,
+      );
+      if (next >= 0) unawaited(_jumpToChapter(next, followListening: true));
+      return;
+    }
+    _addressToPlayback(quiet: true);
+  }
+
+  /// 把页面寻址到正在读的那个字。返回 false 表示这次没法定位。
+  ///
+  /// 迷你栏的定位键和 10Hz 跟随轮询**共用这一个函数**——按键每次都准、跟随
+  /// 却不准，说明差别不在定位而在跟随那条路上的闸门，所以两条路必须走同一段
+  /// 代码。[quiet] 为 true 时（轮询）不弹提示。
+  bool _addressToPlayback({bool quiet = false}) {
+    if (!mounted) return false;
+    final layout = _chapterLayout;
+    if (layout == null) return false;
+    final session = ListeningSession.instance;
+    if (session.bookId != widget.bookId) {
+      if (!quiet) _showMessage('没在听这本书');
+      return false;
+    }
+    // 正在听别的章：先把本页切到那一章再说，切章后轮询会接手。
+    if (session.chapterId != _chapter.itemId) {
+      if (quiet) return false;
+      final next = widget.chapters.indexWhere(
+        (c) => c.itemId == session.chapterId,
+      );
+      if (next >= 0) {
+        unawaited(_jumpToChapter(next, followListening: true));
+      } else {
+        _showMessage('正在播放别的章节');
+      }
+      return true;
+    }
+    _ensureCueIndex(layout);
+    final positionMs = session.position.inMilliseconds;
+    final span = _cueIndex.spanAtPositionMs(positionMs);
+    // [_narrationRange] 是**显示**状态：某一拍没匹配上时故意留着不清，好让
+    // 高亮晚半拍而不是整页变黑。它绝不能当导航锚点 —— 字幕第一句从 3 秒才
+    // 开始（`[3025, 0]`）时，位置 0 查不到句，用它寻址会把页面停到本章最后
+    // 一句上，而且再也回不来。只有整章没有字幕表（官方时间点是唯一锚点）时
+    // 才退回它。
+    final offset = span?.spokenOffset(positionMs) ??
+        (_cueIndex.isEmpty ? _narrationRange?.$1 : null);
+    if (offset == null) {
+      if (!quiet) _showMessage('找不到当前朗读句');
+      return false;
+    }
+    if (_paged) {
+      _pagedKey.currentState?.followOffset(offset);
+    } else if (_scrollController.hasClients) {
+      final max = _scrollController.position.maxScrollExtent;
+      final length = layout.textLength;
+      if (max > 0) {
+        final ratio = length > 0
+            ? (offset / length).clamp(0.0, 1.0)
+            : session.progress;
+        _scrollController.jumpTo(ratio * max);
+      }
+    }
+    return true;
+  }
+
+  /// 迷你听书栏的「跳到播放位置」：按键不受任何闸门限制。
+  void _jumpToPlaybackPosition() {
+    // 按键本身就是「回到朗读处」，回来之后要继续跟。不清闩锁的话轮询还要
+    // 被挡最多 15 秒 —— 按钮点得动，跟随却是死的。
+    _listenFollowPausedUntil = DateTime.fromMillisecondsSinceEpoch(0);
+    _addressToPlayback();
+  }
+
+  /// 双击正文：把朗读跳到手指所指的那一句，可以跨章。
+  ///
+  /// 全局坐标换算成正文字符下标交给选区几何的 `chapterOffsetAt` —— 它已经在
+  /// 处理行内折行、标题占位这些偏移修正，没必要再实现一遍；拿到字符下标后去
+  /// 对照表里查出这句的起点时间，再让播放器跳过去。听的是同一本书的别的章时，
+  /// 播放器会先切到本章再按位置起播。
+  Future<void> _seekToTappedSentence(Offset globalPosition) async {
+    final layout = _chapterLayout;
+    if (layout == null) return;
+    final session = ListeningSession.instance;
+    if (session.bookId == null) {
+      _showMessage('先开始听书，再双击跳读');
+      return;
+    }
+    if (session.bookId != widget.bookId) {
+      _showMessage('正在听别的书');
+      return;
+    }
+    final offset = _marksScope?.geometry.chapterOffsetAt(globalPosition);
+    if (offset == null) return;
+    _ensureCueIndex(layout);
+    if (_cueIndex.isEmpty) {
+      // 跨章时手里的字幕轨是「正在播那一章」的，对不上本章正文。现场取本章
+      // 字幕再跳 —— 否则用户得先手动切到播放中的那章，再翻回来点。
+      final track = await _fetchCueTrack();
+      if (!mounted || !identical(_chapterLayout, layout)) return;
+      if (track == null || track.isEmpty) {
+        _showMessage('本章没有逐句字幕，无法跳读');
+        return;
+      }
+      _ensureCueIndex(layout);
+      if (_cueIndex.isEmpty) {
+        // 字幕取到了，但一句都没对上正文（章节文本被改过，或语音文本不是原文）。
+        _showMessage('本章字幕和正文对不上，无法跳读');
+        return;
+      }
+    }
+    final span = _cueIndex.spanAtChar(offset);
+    if (span == null) {
+      _showMessage('这一点没有对应字幕，换一句试试');
+      return;
+    }
+    if (!AudioPlaybackScope.jumpToChapter(
+      context,
+      _chapter.itemId,
+      span.startPosition,
+    )) {
+      _showMessage('朗读还没准备好，稍后再试');
+      return;
+    }
+    HapticFeedback.selectionClick();
+    // 立刻把高亮移到这句：下一次 tick 要等 200ms，等待期间旧句子还亮着，
+    // 看上去像点错了。跨章时本章本来没高亮，这条跳过即可。
+    if (kReaderHighlightWash &&
+        mounted &&
+        (span.start, span.end) != _narrationRange) {
+      setState(() => _narrationRange = (span.start, span.end));
+    }
+  }
+
   Future<void> _onParagraphLongPress(
     ReaderContentBlock block,
     Offset position,
@@ -524,7 +1142,7 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
     ReaderRangeUnderline? hit;
     final pressed = _marksScope?.geometry.chapterOffsetAt(position);
     if (pressed != null) {
-      for (final underline in _rangeUnderlines) {
+      for (final underline in _displayRangeUnderlines) {
         if (underline.start <= pressed && pressed < underline.end) {
           hit = underline;
           break;
@@ -708,6 +1326,17 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
     setState(() => _selection = null);
   }
 
+  bool _markMatchesSelection(
+    ReaderRangeUnderline mark,
+    ReaderTextSelection selection,
+  ) {
+    final layout = _chapterLayout;
+    return layout != null &&
+        layout.displayOffsetForSource(mark.start) == selection.start &&
+        layout.displayOffsetForSource(mark.end, bias: TextBoundaryBias.end) ==
+            selection.end;
+  }
+
   bool get _selectionUnderlined {
     final selection = _selection;
     if (selection == null) return false;
@@ -719,7 +1348,7 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
     // identity: a whole-paragraph drag can produce one, and only the range
     // store can ever remove it again.
     return _rangeUnderlines.any(
-      (underline) => underline.coversExactly(selection.start, selection.end),
+      (underline) => _markMatchesSelection(underline, selection),
     );
   }
 
@@ -762,7 +1391,7 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
       // paragraph-identity store here would strand it, unreachable for
       // 删除划线 forever.
       final hasExactRange = _rangeUnderlines.any(
-        (underline) => underline.coversExactly(selection.start, selection.end),
+        (underline) => _markMatchesSelection(underline, selection),
       );
       if (block != null && !hasExactRange) {
         await _toggleUnderline(block, add: add);
@@ -773,25 +1402,33 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
     final chapterId = _chapter.itemId;
     final loadGeneration = _loadGeneration;
     final existing = _rangeUnderlines
-        .where(
-          (underline) =>
-              underline.coversExactly(selection.start, selection.end),
-        )
+        .where((underline) => _markMatchesSelection(underline, selection))
         .toList();
     if (!add && existing.isEmpty) return;
     final record = ReaderRangeUnderline(
       bookId: widget.bookId,
       chapterId: chapterId,
-      start: selection.start,
-      end: selection.end,
-      text: layout.textInRange(selection.start, selection.end),
+      start: layout.sourceOffsetForDisplay(selection.start),
+      end: layout.sourceOffsetForDisplay(
+        selection.end,
+        bias: TextBoundaryBias.end,
+      ),
+      text: layout.sourceTextInRange(
+        layout.sourceOffsetForDisplay(selection.start),
+        layout.sourceOffsetForDisplay(
+          selection.end,
+          bias: TextBoundaryBias.end,
+        ),
+      ),
       createdAt: DateTime.now().millisecondsSinceEpoch,
     );
     try {
       if (add) {
         await store.addRange(record);
       } else {
-        await store.remove(existing.first.key);
+        for (final mark in existing) {
+          await store.remove(mark.key);
+        }
       }
     } catch (_) {
       if (mounted) _showMessage(add ? '划线保存失败，请重试' : '删除划线失败，请重试');
@@ -811,7 +1448,9 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
           ..sort((a, b) => a.start.compareTo(b.start));
       } else {
         _rangeUnderlines = _rangeUnderlines
-            .where((underline) => underline.key != existing.first.key)
+            .where(
+              (underline) => !existing.any((mark) => mark.key == underline.key),
+            )
             .toList();
       }
     });
@@ -836,7 +1475,13 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
             chapterId: chapterId,
             paraIndex: block.paraIndex,
             blockIndex: blockIndex,
-            text: block.text,
+            text: _chapterLayout!.sourceTextInRange(
+              _chapterLayout!.sourceOffsetForDisplay(block.start),
+              _chapterLayout!.sourceOffsetForDisplay(
+                block.end,
+                bias: TextBoundaryBias.end,
+              ),
+            ),
             createdAt: DateTime.now().millisecondsSinceEpoch,
           ),
         );
@@ -921,9 +1566,22 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    _followPoll?.cancel();
+    _followPoll = null;
     _chapterRequest?.cancel();
-    HardwareKeyboard.instance.removeHandler(_handleVolumeKey);
+    VolumeKeyService.instance.setOnVolumeKey(null);
+    unawaited(VolumeKeyService.instance.setEnabled(false));
     ListeningSession.instance.removeListener(_onListeningTick);
+    // 只清自己注册的：换章重建时新实例已经接管。
+    if (ListeningSession.instance.jumpToPlaybackHandler ==
+        _jumpToPlaybackPosition) {
+      ListeningSession.instance.jumpToPlaybackHandler = null;
+    }
+    _replacementStore.changes.removeListener(_onReplacementChanged);
+    _replacementCancellation?.cancel();
+    ++_replacementGeneration;
+    _unregisterFairMemoryFlush?.call();
+    _unregisterFairMemoryFlush = null;
     _autoTurnTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     ++_deviceGeneration;
@@ -937,12 +1595,22 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
     _settleReadTime();
     _sessionActive = false;
     unawaited(_persistProgress());
+    EinkRefreshService.instance.flashRequest.removeListener(
+      _onEinkFlashRequest,
+    );
+    _einkFlashTimer?.cancel();
     _scrollController.dispose();
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    // 桌面端窗口失焦报的是 inactive，但窗口还在、内容还在跑。拿它当「退到
+    // 后台」会让鼠标一点别的窗口听书跟随就停摆（见 desktopInactiveStillVisible）。
+    if (state == AppLifecycleState.inactive &&
+        desktopInactiveStillVisible(state)) {
+      return;
+    }
     final resumed = state == AppLifecycleState.resumed;
     if (!resumed && _appActive) {
       _stopAutoTurn();
@@ -964,6 +1632,9 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
         }
       }
     }
+    // 前台/后台切换不影响原生层音量键拦截（在 Activity 层，与 Flutter 生命周期
+    // 无关），故此处无需重挂监听；仅同步一次状态即可。
+    _syncVolumeKeyEnabled();
   }
 
   Future<void> _load({
@@ -972,6 +1643,8 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
   }) async {
     if (widget.chapters.isEmpty) return;
     final generation = ++_loadGeneration;
+    _replacementCancellation?.cancel();
+    ++_replacementGeneration;
     final chapter = _chapter;
     _saveTimer?.cancel();
     setState(() {
@@ -979,6 +1652,7 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
       _progressReady = false;
       _error = null;
       _content = '';
+      _replacement = null;
       _chapterContent = ChapterContent(blocks: const []);
       _chapterLayout = null;
       _layoutMode = null;
@@ -1009,7 +1683,15 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
       if (content.withoutLeadingTitle(chapter.title).isEmpty) {
         throw ApiException('正文为空');
       }
+      final replacement = await _replaceContent(content, chapter.title);
+      if (!mounted || generation != _loadGeneration) return;
+      if (_chapterCache[chapter.itemId] != null &&
+          _chapterCache[chapter.itemId] != text) {
+        await _load(startAtEnd: startAtEnd, chapterTurn: chapterTurn);
+        return;
+      }
       setState(() {
+        _replacement = replacement;
         _content = text;
         _chapterContent = content;
         _savedPosition = saved;
@@ -1022,6 +1704,16 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
         _selection = null;
         _selectionBarOpen = false;
       });
+      // 墨水屏切章刷一次：弹窗/翻页之外的残影来源。首章打开不闪
+      // （_lastEinkRefreshChapterId 在 initState 已记为首章）。
+      if (einkModeNotifier.value &&
+          _lastEinkRefreshChapterId != chapter.itemId) {
+        _lastEinkRefreshChapterId = chapter.itemId;
+        unawaited(EinkRefreshService.instance.requestRefresh());
+      }
+      if (replacement.error != null) {
+        _showMessage('本章替换失败，已显示原文：${replacement.error}');
+      }
       unawaited(_prefetchAround(_index));
       unawaited(_loadIdeas(chapter, generation));
       unawaited(_loadUnderlines());
@@ -1093,43 +1785,73 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
     setState(() => _controlsVisible = false);
     final ideaSnapshot = _ideas;
     final chapter = widget.chapters[_index];
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      useSafeArea: true,
-      showDragHandle: false,
-      backgroundColor: _effectivePreset.isDark
-          ? _effectivePreset.panelColor
-          : Colors.white,
-      barrierColor: Colors.black.withValues(alpha: 0.4),
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(12)),
-      ),
-      clipBehavior: Clip.antiAlias,
-      builder: (context) => FractionallySizedBox(
-        // Match the supplied official screenshot, keeping the paragraph visible
-        // above the comments. Note: 2026-09-11-reader-paragraph-bubble.md.
-        heightFactor: 0.69,
-        child: ReaderIdeasSheet(
-          ideas: ideaSnapshot,
-          preset: _effectivePreset,
-          // Each bubble opens only that paragraph's comments.
-          initialParaIndex: focusParaIndex,
-          loadComments: (paragraph, cursor) async {
-            final resolver = widget.commentResolver;
-            if (resolver != null) {
-              return resolver(chapter.itemId, paragraph, cursor);
-            }
-            return _defaultComments(
-              chapter,
-              paragraph,
-              ideaSnapshot.itemVersion,
-              cursor,
-            );
-          },
+    // Keep immersive on while the sheet is open (#57): the sheet pushes a
+    // route, which would otherwise release the system bars. The flag is
+    // read by [_syncSystemBars] when the route change lands.
+    _ideasSheetOpen = true;
+    try {
+      await showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        useSafeArea: true,
+        showDragHandle: false,
+        backgroundColor: _effectivePreset.isDark
+            ? _effectivePreset.panelColor
+            : Colors.white,
+        // E-ink (#57): a dimmed scrim forces a full-screen gray wash and
+        // ghosts on e-ink. Transparent keeps the page readable behind the
+        // sheet; tapping outside still dismisses it.
+        barrierColor: einkModeNotifier.value
+            ? Colors.transparent
+            : Colors.black.withValues(alpha: 0.4),
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(12)),
         ),
-      ),
-    );
+        clipBehavior: Clip.antiAlias,
+        builder: (context) => FractionallySizedBox(
+          // Match the supplied official screenshot, keeping the paragraph visible
+          // above the comments. Note: 2026-09-11-reader-paragraph-bubble.md.
+          heightFactor: 0.69,
+          child: ReaderIdeasSheet(
+            ideas: ideaSnapshot,
+            preset: _effectivePreset,
+            // Each bubble opens only that paragraph's comments.
+            initialParaIndex: focusParaIndex,
+            loadComments: (paragraph, cursor) async {
+              final resolver = widget.commentResolver;
+              if (resolver != null) {
+                return resolver(chapter.itemId, paragraph, cursor);
+              }
+              return _defaultComments(
+                chapter,
+                paragraph,
+                ideaSnapshot.itemVersion,
+                cursor,
+              );
+            },
+            // 回复按需展开（issue #95）。与段评正文同一套「注入即离线」
+            // 约定：调用方自己提供数据时不接网络，也就不给可点的回复入口。
+            replyLoader: _ideasReplyLoader(),
+          ),
+        ),
+      );
+    } finally {
+      // The sheet is gone. Release the immersive hold here only if this
+      // route is already current again; otherwise didChangeDependencies
+      // releases it once the route regains current status (#57). The
+      // sheet route stays present until its close animation ends, so an
+      // unconditional release here would sync "not immersive" before
+      // that notification lands and flash the status bar for a frame.
+      // Guard mounted: if the reader was disposed while the sheet was
+      // open, dispose already closed the device session and no stale
+      // call may follow it.
+      if (mounted && _routeCurrent) {
+        _ideasSheetOpen = false;
+        _syncSystemBars();
+      }
+      // 墨水屏：段评面板关闭后刷一次，清掉面板残影。
+      _maybeEinkRefresh();
+    }
   }
 
   /// Default idea fetch and comment resolution; see [ReaderPage.ideasLoader].
@@ -1153,6 +1875,25 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
       itemVersion: chapter.version.isNotEmpty ? chapter.version : ideaVersion,
       paraIndex: paragraph.paraIndex,
       cursor: cursor,
+    );
+  }
+
+  /// Loads one comment's replies for the paragraph sheet.
+  ///
+  /// Null when the caller injected its own comment data or when a chapter
+  /// cache was injected (both mark an offline caller), which keeps the reply
+  /// counter a plain read-only number for them.
+  Future<CommentReplyPage> Function(String commentId)? _ideasReplyLoader() {
+    if (widget.commentResolver != null ||
+        widget.ideasLoader != null ||
+        widget.chapterCache != null) {
+      return null;
+    }
+    if (widget.bookId.isEmpty) return null;
+    return (commentId) => ApiClient.instance.commentReplies(
+      widget.bookId,
+      commentId,
+      groupId: widget.bookId,
     );
   }
 
@@ -1236,8 +1977,17 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
           revision != (_chapterCacheRevisions[chapter.itemId] ?? 0)) {
         return;
       }
-      _onChapterContentAvailable(chapter, text);
-      if (!catalogReady) return;
+      final update = _onChapterContentAvailable(chapter, text);
+      // The callback publishes its raw cache revision synchronously before
+      // awaiting conversion. A newer batch may supersede it during that await.
+      final publishedRevision = _chapterCacheRevisions[chapter.itemId] ?? 0;
+      await update;
+      if (!catalogReady ||
+          !mounted ||
+          publishedRevision != (_chapterCacheRevisions[chapter.itemId] ?? 0) ||
+          _chapterCache[chapter.itemId] != text) {
+        return;
+      }
       try {
         await _diskCache.write(
           bookId: widget.bookId,
@@ -1265,7 +2015,7 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
 
   // Note: 批量补图与预取共享缓存版本，迟到旧结果不能覆盖新图文；见
   // .agents/notes/implemented/bug-fix/2026-09-10-reader-illustrations.md
-  void _onChapterContentAvailable(Chapter chapter, String text) {
+  Future<void> _onChapterContentAvailable(Chapter chapter, String text) async {
     // A cache hit must not invalidate an in-flight signature refresh.
     if (!mounted || _chapterCache[chapter.itemId] == text) return;
     final fetched = ChapterContent.fromCacheText(text);
@@ -1286,10 +2036,20 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
     if (_loading || chapter.itemId != _chapter.itemId || text == _content) {
       return;
     }
+    final generation = ++_replacementGeneration;
+    final loadGeneration = _loadGeneration;
+    final replacement = await _replaceContent(content, chapter.title);
+    if (!mounted ||
+        generation != _replacementGeneration ||
+        loadGeneration != _loadGeneration ||
+        chapter.itemId != _chapter.itemId ||
+        _chapterCache[chapter.itemId] != text) {
+      return;
+    }
     final hasImages = _chapterContent.hasImages;
     final restoring = _needsRestore;
     final offset = hasImages
-        ? _textOffset
+        ? _chapterLayout?.sourceOffsetForDisplay(_textOffset) ?? _textOffset
         : _chapterLayout?.legacyOffsetForText(_textOffset) ?? _textOffset;
     setState(() {
       if (restoring) {
@@ -1308,6 +2068,8 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
       }
       _content = text;
       _chapterContent = content;
+      _replacement = replacement;
+      _selection = null;
       _chapterLayout = null;
       _layoutMode = null;
       _needsRestore = true;
@@ -1404,36 +2166,46 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
     final spec = ReaderLayoutSpec(
       viewport: constraints.biggest,
       textScaler: MediaQuery.textScalerOf(context),
-      preferences: _preferences,
+      preferences: _displayPreferences,
       fontFamily:
           _fontFamily ?? Theme.of(context).textTheme.bodyLarge?.fontFamily,
     );
     if (_chapterLayout?.spec == spec &&
         _layoutMode == _preferences.pageMode &&
         _layoutIdeasRevision == _ideasRevision &&
-        _layoutUnderlineRevision == _underlineRevision) {
+        _layoutUnderlineRevision == _underlineRevision &&
+        _layoutBubblesVisible == _preferences.showParagraphBubbles) {
       return _chapterLayout!;
     }
     // Reuse the measured text layout only when nothing that feeds it changed.
     // Switching page mode keeps the same spec and page-insensitive measurements,
     // so it must not re-measure — but bubbles or 划线 must.
+    // The bubble switch gates the data itself (not just the builder):
+    // the layout reserves placeholder space from bubbleCount, so a null
+    // builder alone would leave an empty gap at the paragraph end.
+    final bubblesVisible = _preferences.showParagraphBubbles;
     final reusable =
         _chapterLayout?.spec == spec &&
         _layoutIdeasRevision == _ideasRevision &&
-        _layoutUnderlineRevision == _underlineRevision;
+        _layoutUnderlineRevision == _underlineRevision &&
+        _layoutBubblesVisible == bubblesVisible;
     final layout = reusable
         ? _chapterLayout!
         : ReaderChapterLayout(
             title: _chapter.title,
             content: _chapterContent,
+            replacement: _replacement,
             spec: spec,
-            paragraphBubbles: _ideas.bubbleCounts,
-            paragraphBubbleVariants: _ideas.bubbleVariants,
+            paragraphBubbles: bubblesVisible ? _ideas.bubbleCounts : const {},
+            paragraphBubbleVariants: bubblesVisible
+                ? _ideas.bubbleVariants
+                : const {},
             underlinedParagraphs: _underlines,
-            bubbleBuilder: _buildParagraphBubble,
+            bubbleBuilder: bubblesVisible ? _buildParagraphBubble : null,
           );
     _layoutIdeasRevision = _ideasRevision;
     _layoutUnderlineRevision = _underlineRevision;
+    _layoutBubblesVisible = bubblesVisible;
     final initialRestore = _needsRestore;
     final restored = initialRestore
         ? layout.restore(
@@ -1481,6 +2253,17 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
   void _onScroll() {
     _saveTimer?.cancel();
     if (!_progressReady || _paged) return;
+    // 墨水屏滚动模式：按滚动距离累积，每滚够约 3 屏刷一次。
+    if (einkModeNotifier.value && _scrollController.hasClients) {
+      final offset = _scrollController.offset;
+      _einkScrollDistance += (offset - _einkLastScrollOffset).abs();
+      _einkLastScrollOffset = offset;
+      final viewport = _scrollController.position.viewportDimension;
+      if (viewport > 0 && _einkScrollDistance >= viewport * 3) {
+        _einkScrollDistance = 0;
+        unawaited(EinkRefreshService.instance.requestRefresh());
+      }
+    }
     _captureScrollProgress(updateTextOffset: true);
     _saveTimer = Timer(const Duration(milliseconds: 500), () {
       _settleReadTime();
@@ -1532,6 +2315,39 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
     });
     _settleReadTime();
     unawaited(_persistProgress());
+    // 分页模式的实际翻页：累加墨水屏刷新计数（覆盖音量键/自动翻页/点按翻页）。
+    _recordEinkPageTurn();
+  }
+
+  /// 墨水屏：弹窗/菜单关闭后刷一次，清掉弹窗残影。非墨水屏不做事。
+  void _maybeEinkRefresh() {
+    if (!einkModeNotifier.value) return;
+    unawaited(EinkRefreshService.instance.requestRefresh());
+  }
+
+  /// 软件白闪：盖一张全屏白帧 150ms 再撤掉。白帧本身就是一次可见闪烁，
+  /// 墨水屏上这正是全刷的观感；连续请求进来时重计时，不叠加多闪。
+  void _onEinkFlashRequest() {
+    if (!mounted) return;
+    _einkFlashTimer?.cancel();
+    if (!_einkFlashVisible) setState(() => _einkFlashVisible = true);
+    _einkFlashTimer = Timer(const Duration(milliseconds: 150), () {
+      if (!mounted) return;
+      setState(() => _einkFlashVisible = false);
+    });
+  }
+
+  /// 墨水屏整屏刷新：翻够 [_preferences.einkRefreshInterval] 页触发一次海信 EPD
+  /// 全刷压残影。全局墨水屏未开或间隔为 0 时直接跳过，计数不累加。
+  void _recordEinkPageTurn() {
+    if (!einkModeNotifier.value) return;
+    final interval = _preferences.einkRefreshInterval;
+    if (interval <= 0) return;
+    _einkPageCounter++;
+    if (_einkPageCounter >= interval) {
+      _einkPageCounter = 0;
+      unawaited(EinkRefreshService.instance.requestRefresh());
+    }
   }
 
   Future<void> _pageBoundary(int direction) async {
@@ -1589,10 +2405,14 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
       'bookId': widget.bookId,
       'chapterId': chapterId,
       'episode': index,
+      // 总章数：书架靠「第 N/M 章」区分「读到末尾」与「全书读完」
+      // （issue #110 第 3 条）。官方存的是 itemCounts，见 ChaseUpdateModel。
+      'chapterCount': widget.chapters.length,
       'position': position,
       'maxScroll': max,
       'positionVersion': 2,
-      'textOffset': _textOffset,
+      'textOffset':
+          _chapterLayout?.sourceOffsetForDisplay(_textOffset) ?? _textOffset,
       'progress': progress,
       'cover': widget.cover,
       'time': DateTime.now().millisecondsSinceEpoch,
@@ -1623,8 +2443,22 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
         widget.chapters.length;
   }
 
+  /// Goes to the previous chapter.
+  ///
+  /// [startAtEnd] exists for the *continuous reading* paths only: paging past
+  /// the first page of a chapter, overscrolling at the top, or a tap zone that
+  /// means "back one chapter while scrolling". Those land on the previous
+  /// chapter's end so reading continues where it left off.
+  ///
+  /// An explicit「上一章」controls (toolbar button, chapter slider arrow, menu
+  /// row) must NOT pass it: the official client addresses chapters as
+  /// `Y(chapterId, 0, …)` — always the chapter start — and landing on the last
+  /// page while「下一章」lands on the first made the pair feel broken
+  /// (issue #110).
   Future<void> _prev({bool startAtEnd = false}) async {
     if (_index <= 0 || _changingChapter) return;
+    // 用户主动换章 = 不想被朗读拽回去，否则轮询 100ms 后又跳回正在播的那章。
+    _pauseListenFollow();
     _changingChapter = true;
     try {
       _settleReadTime();
@@ -1644,6 +2478,8 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
       _showMessage('已是最后一章');
       return;
     }
+    // 同 [_prev]：主动翻到下一章也要退出跟随。
+    _pauseListenFollow();
     _changingChapter = true;
     try {
       _settleReadTime();
@@ -1667,9 +2503,8 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
     }
     _changingChapter = true;
     try {
-      _settleReadTime();
-      await _persistProgress();
-      if (!mounted) return;
+      // 闸门要排在结算/存盘**前面**：被闩锁挡住的这次跟随切章什么都没做，
+      // 而在后面的话轮询每 100ms 都会存一次进度。
       if (followListening &&
           (!_routeCurrent ||
               !_appActive ||
@@ -1683,6 +2518,9 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
               ))) {
         return;
       }
+      _settleReadTime();
+      await _persistProgress();
+      if (!mounted) return;
       setState(() {
         _index = index;
         _chapterSeekValue = null;
@@ -1699,6 +2537,8 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
       await _pagedKey.currentState?.turnPage(direction);
       return;
     }
+    // 滚动模式的离散翻页（音量键/点按边缘/自动翻页）记一次，连续拖拽不计入。
+    _recordEinkPageTurn();
     if (!_scrollController.hasClients) return;
     final position = _scrollController.position;
     const boundaryTolerance = 2.0;
@@ -1731,19 +2571,61 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
       ScaffoldMessenger.of(context).hideCurrentSnackBar();
     }
     setState(() => _controlsVisible = !_controlsVisible);
+    _syncVolumeKeyEnabled();
+  }
+
+  /// 点击区域九宫格分发：按点按位置取九宫格动作执行。
+  void _handleTapZone(Offset position, BoxConstraints constraints) {
+    final action = readerTapZoneActionAt(
+      zones: _preferences.tapZones,
+      dx: position.dx,
+      dy: position.dy,
+      width: constraints.maxWidth,
+      height: constraints.maxHeight,
+    );
+    switch (action) {
+      case ReaderTapZoneAction.none:
+        break;
+      case ReaderTapZoneAction.menu:
+        _toggleControls();
+      case ReaderTapZoneAction.prevPage:
+        _pauseListenFollow();
+        unawaited(_turnPage(-1));
+      case ReaderTapZoneAction.nextPage:
+        _pauseListenFollow();
+        unawaited(_turnPage(1));
+      case ReaderTapZoneAction.prevChapter:
+        unawaited(_prev());
+      case ReaderTapZoneAction.nextChapter:
+        unawaited(_next());
+      case ReaderTapZoneAction.toc:
+        unawaited(_showDirectory());
+    }
   }
 
   void _previewPreferences(ReaderPreferences preferences) {
     _preferencesDirty = true;
     final fontChanged = preferences.fontPath != _preferences.fontPath;
+    final intervalChanged =
+        preferences.einkRefreshInterval != _preferences.einkRefreshInterval;
     setState(() {
       _preferences = preferences.normalized();
       if (_preferences.themePreset != ReaderThemePreset.dark) {
         _dayTheme = _preferences.themePreset;
       }
+      // 刷新间隔改变时清零计数，避免沿用旧阈值导致久不刷新或立刻刷新。
+      if (intervalChanged) _einkPageCounter = 0;
     });
+    _syncSystemBars();
     if (fontChanged) unawaited(_loadFont(preferences.fontPath));
   }
+
+  Future<void> _showTextReplacement() => Navigator.push<void>(
+    context,
+    MaterialPageRoute(
+      builder: (_) => TextReplacementPage(store: _replacementStore),
+    ),
+  );
 
   Future<void> _showAppearanceSettings() async {
     setState(() => _controlsVisible = false);
@@ -1759,17 +2641,29 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
       builder: (context) => ReaderAppearanceSheet(
         initialValue: _preferences,
         einkOverride: einkModeNotifier.value,
+        oledOverride: oledActive(),
         onChanged: _previewPreferences,
         onPickFont: _pickFont,
+        onTextReplacement: () {
+          Navigator.pop(context);
+          unawaited(_showTextReplacement());
+        },
       ),
     );
+    // 墨水屏：排版面板关闭后刷一次，清掉面板残影。
+    _maybeEinkRefresh();
     await _savePreferences();
   }
 
   void _toggleNightTheme() {
     // 全局墨水屏覆盖显示，点夜间不会有任何可见变化，先提示而非静默无响应。
     if (einkModeNotifier.value) {
-      _showMessage('全局墨水屏模式已开启，先在设置里关闭它再切换夜间');
+      _showMessage('全局墨水屏已开启，先在 设置 → 外观 换成其它主题');
+      return;
+    }
+    // OLED 同理：阅读背景被全局纯黑接管，点夜间看不出变化。
+    if (oledActive()) {
+      _showMessage('全局 OLED 纯黑已开启，先在 设置 → 外观 关闭它再切换背景');
       return;
     }
     final nextPreset = _preferences.themePreset == ReaderThemePreset.dark
@@ -1812,6 +2706,8 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
         ),
       ),
     );
+    // 墨水屏：目录关闭后刷一次（选了章节时切章本身也会刷一次，不叠加也无妨）。
+    _maybeEinkRefresh();
     if (selected != null && mounted) await _jumpToChapter(selected);
   }
 
@@ -1823,7 +2719,8 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
     if (!system) {
       _openingListening = true;
       try {
-        final choice = await showModalBottomSheet<bool>(
+        // 0 = 从头/续播，1 = 从本页播放，2 = 系统朗读。
+        final choice = await showModalBottomSheet<int>(
           context: context,
           useSafeArea: true,
           showDragHandle: true,
@@ -1837,20 +2734,34 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
                   leading: const Icon(Icons.headphones),
                   title: const Text('听书'),
                   subtitle: const Text('使用作品自带音频与音色'),
-                  onTap: () => Navigator.pop(context, false),
+                  onTap: () => Navigator.pop(context, 0),
+                ),
+                ListTile(
+                  leading: const Icon(Icons.my_location),
+                  title: const Text('从本页播放'),
+                  subtitle: const Text('从当前页第一段开始听'),
+                  onTap: () => Navigator.pop(context, 1),
                 ),
                 ListTile(
                   leading: const Icon(Icons.record_voice_over),
                   title: const Text('系统朗读'),
                   subtitle: const Text('使用手机已安装的 TTS 引擎'),
-                  onTap: () => Navigator.pop(context, true),
+                  onTap: () => Navigator.pop(context, 2),
                 ),
               ],
             ),
           ),
         );
         if (!mounted || choice == null || chapterId != _chapter.itemId) return;
-        system = choice;
+        if (choice == 1) {
+          final anchor = _currentPageAnchor();
+          await _openUpstreamListening(
+            fromMs: anchor.startMs ?? fromMs,
+            textId: anchor.textId ?? textId,
+          );
+          return;
+        }
+        system = choice == 2;
       } finally {
         _openingListening = false;
       }
@@ -1862,14 +2773,21 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
     _openingListening = true;
     try {
       _stopAutoTurn();
+      final snapshot = _replacementStore.snapshot;
+      final replacement = _replacement;
+      if (replacement == null ||
+          replacement.snapshotRevision != snapshot.revision) {
+        _showMessage('正文替换正在更新，请稍后重试');
+        return;
+      }
       final content = _chapterContent;
       final chapter = _chapter;
       var offset = 0;
       if (textId != null) {
-        final body = content.withoutLeadingTitle(chapter.title);
+        final body = replacement.bodyBlocks(chapter.title);
         var found = false;
-        for (var i = 0; i < body.blocks.length; i++) {
-          final block = body.blocks[i];
+        for (var i = 0; i < body.length; i++) {
+          final block = body[i];
           if (block is! ChapterParagraph) continue;
           if (paragraphUnderlineId(paraIndex: block.paraIndex, blockIndex: i) ==
               textId) {
@@ -1885,9 +2803,12 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
       final book = SystemTtsBook(
         bookId: widget.bookId,
         title: widget.title,
+        coverUrl: widget.cover,
         chapters: widget.chapters,
         startIndex: _index,
         initialContent: content,
+        replacementSnapshot: snapshot,
+        replacementStore: _replacementStore,
         startOffset: offset,
         localOnly: widget.localOnly,
         textLoader: widget.chapterLoader,
@@ -1949,6 +2870,9 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
             chapters: widget.chapters,
             startIndex: chapterIndex,
             resumeSession: false,
+            // 沿用正在听的那个音色：不传的话播放页只能挑默认音色，
+            // 「从本页播放」就会把真人讲书换成内置 TTS。
+            initialToneId: _listeningToneId(),
             // A paragraph-anchored request always carries an explicit start:
             // Duration.zero means "this paragraph has no audio, begin at the
             // chapter opening" and must not fall back to saved history.
@@ -1962,6 +2886,32 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
     } finally {
       _openingListening = false;
     }
+  }
+
+  /// 本会话正在用的音色；不在听这本书时为 null（交给播放页按历史/默认决定）。
+  String? _listeningToneId() {
+    final session = ListeningSession.instance;
+    if (session.bookId != widget.bookId) return null;
+    final tone = session.toneId;
+    return (tone == null || tone.isEmpty) ? null : tone;
+  }
+
+  /// 「从本页播放」的锚点：当前页第一个正文段落的段落 ID 与它的起播时间。
+  ///
+  /// 时间取 [ReaderContentBlock.startMs]（章节自带的 `<span start_time>`），
+  /// 与「从本段听」同源。没有时间轴的章返回 startMs 为 null，调用方退回续播。
+  ({int? startMs, int? textId}) _currentPageAnchor() {
+    final layout = _chapterLayout;
+    if (layout == null || layout.pages.isEmpty) {
+      return (startMs: null, textId: null);
+    }
+    final page = layout.pages[_pageIndex.clamp(0, layout.pages.length - 1)];
+    for (final fragment in page.fragments) {
+      final block = fragment.block;
+      if (block.isTitle || block.isImage || block.text.isEmpty) continue;
+      return (startMs: block.startMs, textId: block.textId);
+    }
+    return (startMs: null, textId: null);
   }
 
   /// The spoken start of the paragraph identified by [textId], when the chapter
@@ -2030,12 +2980,104 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
     );
   }
 
-  Widget _buildReader(BuildContext context) => DisplaySafeBackground(
-    color: _effectivePreset.backgroundColor,
-    child: _buildReaderPage(context),
-  );
+  DateTime _desktopWheelAt = DateTime.fromMillisecondsSinceEpoch(0);
 
-  Widget _buildReaderPage(BuildContext context) {
+  void _desktopScroll(PointerSignalEvent signal) {
+    if (!_paged ||
+        signal is! PointerScrollEvent ||
+        signal.scrollDelta.dy == 0) {
+      return;
+    }
+    GestureBinding.instance.pointerSignalResolver.register(signal, (_) {
+      final now = DateTime.now();
+      if (now.difference(_desktopWheelAt).inMilliseconds < 180) return;
+      _desktopWheelAt = now;
+      unawaited(_turnPage(signal.scrollDelta.dy > 0 ? 1 : -1));
+    });
+  }
+
+  Widget _buildReader(BuildContext context) {
+    if (!isWindowsDesktop) {
+      return DisplaySafeBackground(
+        color: _effectivePreset.backgroundColor,
+        child: _buildReaderSurface(context),
+      );
+    }
+    return LayoutBuilder(
+      builder: (context, bounds) => ColoredBox(
+        color: _effectivePreset.backgroundColor,
+        child: Row(
+          children: [
+            if (bounds.maxWidth >= 1000)
+              DesktopChapterSidebar(
+                chapters: widget.chapters,
+                currentIndex: _index,
+                onSelected: (index) => unawaited(_jumpToChapter(index)),
+              ),
+            Expanded(
+              child: Center(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 880),
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      Focus(
+                        autofocus: true,
+                        onKeyEvent: (node, event) {
+                          if (event is! KeyDownEvent ||
+                              FocusManager.instance.primaryFocus?.context
+                                      ?.findAncestorWidgetOfExactType<
+                                        EditableText
+                                      >() !=
+                                  null) {
+                            return KeyEventResult.ignored;
+                          }
+                          final key = event.logicalKey;
+                          if ([
+                            LogicalKeyboardKey.arrowRight,
+                            LogicalKeyboardKey.pageDown,
+                          ].contains(key)) {
+                            unawaited(_turnPage(1));
+                            return KeyEventResult.handled;
+                          }
+                          if ([
+                            LogicalKeyboardKey.arrowLeft,
+                            LogicalKeyboardKey.pageUp,
+                          ].contains(key)) {
+                            unawaited(_turnPage(-1));
+                            return KeyEventResult.handled;
+                          }
+                          return KeyEventResult.ignored;
+                        },
+                        child: Listener(
+                          onPointerSignal: _desktopScroll,
+                          child: _buildReaderSurface(context),
+                        ),
+                      ),
+                      Positioned.fill(
+                        child: IgnorePointer(
+                          child: ValueListenableBuilder<double>(
+                            valueListenable: DesktopPlatform.readerBrightness,
+                            builder: (_, brightness, _) => ColoredBox(
+                              color: Colors.black.withValues(
+                                alpha: 1 - brightness,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildReaderSurface(BuildContext context) {
     final preset = _effectivePreset;
     final windowPadding = MediaQuery.paddingOf(context);
     final overlayStyle = preset.isDark
@@ -2129,6 +3171,9 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
                 ),
                 _menuEdge(top: true, child: _buildToolbar(preset)),
                 _menuEdge(top: false, child: _buildReaderControls(preset)),
+                // 墨水屏软件白闪：盖全屏白帧，迫使 EPD 控制器全量刷新。
+                if (_einkFlashVisible)
+                  const Positioned.fill(child: ColoredBox(color: Colors.white)),
               ],
             ),
           ),
@@ -2147,7 +3192,10 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
       child: ExcludeSemantics(
         excluding: !_controlsVisible,
         child: AnimatedSwitcher(
-          duration: const Duration(milliseconds: 180),
+          // 墨水屏：菜单滑入/淡出动画也会留残影，直接跳变。
+          duration: einkModeNotifier.value
+              ? Duration.zero
+              : const Duration(milliseconds: 180),
           switchInCurve: Curves.easeOutCubic,
           switchOutCurve: Curves.easeInCubic,
           transitionBuilder: (child, animation) => SlideTransition(
@@ -2221,6 +3269,23 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
                 ),
                 icon: Icon(LucideIcons.message_circle, color: preset.textColor),
               ),
+            ValueListenableBuilder<int>(
+              valueListenable: ShelfStore.instance.listenable,
+              builder: (context, _, _) {
+                final inShelfNow = inShelf(_shelfEntry);
+                return IconButton(
+                  key: const ValueKey('reader-shelf-button'),
+                  tooltip: inShelfNow ? '已在书架' : '加入书架',
+                  onPressed: () => unawaited(toggleShelf(context, _shelfEntry)),
+                  icon: Icon(
+                    inShelfNow
+                        ? LucideIcons.bookmark_check
+                        : LucideIcons.bookmark_plus,
+                    color: preset.textColor,
+                  ),
+                );
+              },
+            ),
             IconButton(
               tooltip: '收起阅读菜单',
               onPressed: _toggleControls,
@@ -2258,11 +3323,48 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
             : _errorView(textColor: preset.textColor),
       );
     }
+    if (_replacement?.bodyIsEmpty(_chapter.title) == true) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('本章正文已被替换规则清空'),
+            TextButton(
+              onPressed: _showTextReplacement,
+              child: const Text('编辑规则'),
+            ),
+            TextButton(
+              onPressed: () async {
+                try {
+                  await _replacementStore.save(
+                    enabled: false,
+                    rules: _replacementStore.snapshot.rules,
+                  );
+                } catch (_) {
+                  if (mounted) _showMessage('替换规则保存失败');
+                }
+              },
+              child: const Text('停用正文替换'),
+            ),
+          ],
+        ),
+      );
+    }
     return LayoutBuilder(
       builder: (context, constraints) {
         final layout = _prepareLayout(constraints);
         final scope = _marksScopeFor(preset, layout);
-        return GestureDetector(
+        // 桌面端用鼠标中键定位到点中的那一句。Listener 读原始指针事件，
+        // 不参与手势竞技场，所以和翻页、长按、选词都不冲突；移动端没有中键，
+        // 仍走下面的双击。
+        return Listener(
+          onPointerDown: (event) {
+            if (event.buttons != kMiddleMouseButton) return;
+            if (_doubleTapArmed) {
+              _seekToTappedSentence(event.position);
+            }
+          },
+          child: GestureDetector(
           key: const ValueKey('reader-page-surface'),
           behavior: HitTestBehavior.translucent,
           onTapUp: (details) {
@@ -2276,17 +3378,15 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
               _stopAutoTurn();
             } else if (_controlsVisible) {
               _toggleControls();
-            } else if (details.localPosition.dx < constraints.maxWidth / 3) {
-              _pauseListenFollow();
-              _turnPage(-1);
-            } else if (details.localPosition.dx >
-                constraints.maxWidth * 2 / 3) {
-              _pauseListenFollow();
-              _turnPage(1);
             } else {
-              _toggleControls();
+              _handleTapZone(details.localPosition, constraints);
             }
           },
+          // 听这本书时才挂双击（同章、跨章都行）：双击识别器会把普通单击推迟到
+          // 300ms 超时后才响应，没在听书时别拖累翻页点按。
+          onDoubleTapDown: _doubleTapArmed
+              ? (details) => _seekToTappedSentence(details.globalPosition)
+              : null,
           child: Stack(
             key: _selectionOverlayKey,
             children: [
@@ -2301,7 +3401,17 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
                         onPageChanged: _onPageChanged,
                         onBoundary: _pageBoundary,
                         onDragStart: _hideControlsOnDrag,
-                        turnStyle: _preferences.pageTurnStyle,
+                        // 墨水屏强制零动画翻页：动画帧在墨水屏上全是残影。
+                        // turnStyle == none 时章节边界动画也随之跳过。
+                        instantSwipe: einkEffectiveInstantSwipe(
+                          eink: einkModeNotifier.value,
+                          instantSwipeTurn: _preferences.instantSwipeTurn,
+                        ),
+                        turnStyle: einkEffectiveTurnStyle(
+                          eink: einkModeNotifier.value,
+                          instantSwipeTurn: _preferences.instantSwipeTurn,
+                          pageTurnStyle: _preferences.pageTurnStyle,
+                        ),
                         backgroundColor: preset.backgroundColor,
                         endPage: _index == widget.chapters.length - 1
                             ? _buildChapterEndPage(preset)
@@ -2317,7 +3427,8 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
                         onParagraphLongPressEnd: _onParagraphLongPressEnd,
                         selectionScope: scope,
                         selection: _selection,
-                        rangeUnderlines: _rangeUnderlines,
+                        rangeUnderlines: _displayRangeUnderlines,
+                        narrationRange: _narrationRange,
                       )
                     : _buildScrollContent(layout, scope),
               ),
@@ -2325,6 +3436,7 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
               ?_selectionBar(preset, windowPadding),
             ],
           ),
+        ),
         );
       },
     );
@@ -2343,6 +3455,7 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
         washColor: preset.selectionWashColor,
         handleColor: preset.selectionHandleColor,
         underlineColor: preset.selectionUnderlineColor,
+        narrationColor: preset.narrationHighlightColor,
       );
       _marksScopeLayout = layout;
     }
@@ -2646,7 +3759,8 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
                 imageProviderFactory: widget.imageProviderFactory,
                 selectionScope: scope,
                 selection: _selection,
-                rangeUnderlines: _rangeUnderlines,
+                rangeUnderlines: _displayRangeUnderlines,
+                narrationRange: _narrationRange,
                 onParagraphLongPress: (block, position) =>
                     unawaited(_onParagraphLongPress(block, position)),
                 onParagraphLongPressMoveUpdate: _onParagraphLongPressMoveUpdate,
@@ -2671,9 +3785,7 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(fontSize: 14, height: 1.4),
                     ),
-                    onPressed: _index > 0
-                        ? () => _prev(startAtEnd: true)
-                        : null,
+                    onPressed: _index > 0 ? _prev : null,
                   ),
                 ),
                 const SizedBox(width: 16),
@@ -2725,14 +3837,14 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
     final previewIndex = seekValue.round().clamp(0, widget.chapters.length - 1);
     return ReaderControls(
       key: const ValueKey('reader-controls'),
-      preferences: _preferences,
+      preferences: _displayPreferences,
       chapterIndex: previewIndex,
       chapterCount: widget.chapters.length,
       chapterTitle: widget.chapters[previewIndex].title,
       seekValue: seekValue,
       deviceAvailable: _deviceAvailable,
       systemBrightness: _deviceStatus.systemBrightness,
-      onPrevious: _index > 0 ? () => _prev(startAtEnd: true) : null,
+      onPrevious: _index > 0 ? _prev : null,
       onNext: _index < widget.chapters.length - 1 ? _next : null,
       onSeek: (value) => setState(() => _chapterSeekValue = value),
       onSeekEnd: (value) {

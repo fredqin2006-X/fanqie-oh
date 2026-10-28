@@ -11,7 +11,11 @@ fn main() {
         .std("c11")
         .define("CBC", "0")
         .define("CTR", "0")
-        .define("ECB", "1");
+        .define("ECB", "1")
+        .include("../native/crypto_core");
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        build.flag_if_supported("/experimental:c11atomics");
+    }
     for file in files {
         build.file(file);
         println!("cargo:rerun-if-changed={file}");

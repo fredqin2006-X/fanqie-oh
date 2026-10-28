@@ -111,6 +111,7 @@ class ControlledNativePlayer extends FakeNativePlayer {
   Future<void> setVolume(double volume) async {
     if (disposed) return;
     calls.add('volume:$volume');
+    this.volume = volume;
   }
 
   void emitPosition(Duration position) {

@@ -2,6 +2,13 @@
 
 基线：`ch6vip/fqapp` 提交 `5938f25dab2015f502ded1f2079ec2a51b8b4bc6`，版本 `1.0.120+125`。
 
+2026-10-28 将本地安卓参考同步至 `43b20ba40d91d98322f29344847788ac54a15971`
+（`1.0.133+138`）。874 个文件逐一通过 SHA-256 校验，清除上游已删除的
+18 个旧文件，没有创建旧源码备份。同步记录见
+[`upstream/android-reference.json`](upstream/android-reference.json)，鸿蒙跟进评估见
+[`upstream/2026-10-28-android-followup.md`](upstream/2026-10-28-android-followup.md)。
+本节首行为最初移植基线。本轮按用户要求进一步合入新版共享 Dart/Rust 功能、组件及测试，并用鸿蒙平台接口接续原生功能；详细范围及验证边界见上述记录。
+
 2026-10-16 开始受控导入 `lib/`、`test/`、`assets/`、`rust/`、`native/crypto_core/`、`native/third_party/tiny_aes/`、FRB 配置与锁文件，保留 `app/LICENSE`。没有导入 Android Gradle、Kotlin 或 JNI 工程，也不依赖参考目录构建。
 
 ## 界面约束

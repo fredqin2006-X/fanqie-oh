@@ -6,6 +6,7 @@ import 'package:fqapp/models/audio_extra.dart';
 import 'package:fqapp/models/chapter_media.dart';
 import 'package:fqapp/models/media_item.dart';
 import 'package:fqapp/pages/audio_page.dart';
+import 'package:fqapp/services/app_theme.dart';
 import 'package:fqapp/services/audio_preferences.dart';
 import 'package:fqapp/services/native_player.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -29,13 +30,13 @@ void main() {
       expect(find.byType(Texture), findsNothing);
       player.emitPosition(const Duration(seconds: 25));
       await tester.pump();
-      await tester.tap(find.byTooltip('后退15秒'));
+      await tester.tap(find.text('-15 s'));
       await _flush(tester);
       expect(player.position, const Duration(seconds: 10));
-      await tester.tap(find.byTooltip('后退15秒'));
+      await tester.tap(find.text('-15 s'));
       await _flush(tester);
       expect(player.position, Duration.zero);
-      await tester.tap(find.byTooltip('前进15秒'));
+      await tester.tap(find.text('+15 s'));
       await _flush(tester);
       expect(player.position, const Duration(seconds: 15));
       final slider = tester.widget<Slider>(
@@ -178,25 +179,53 @@ void main() {
   ) async {
     final session = _Session();
     await _mount(tester, session);
+    // 官方 `te`「%s后播放下一集」：播完先进倒计时窗口，不再立刻跳章。
     session.players.first.emitCompleted();
+    await _flush(tester);
+    expect(find.byKey(const Key('audio_advance_banner')), findsOneWidget);
+    expect(session.players, hasLength(1));
+    await tester.pump(const Duration(seconds: 3));
     await _flush(tester);
     expect(session.players, hasLength(2));
     expect(session.store.entry?['chapterId'], '2');
     expect(session.players.last.isPlaying, true);
     session.players.last.emitCompleted();
     await _flush(tester);
+    await tester.pump(const Duration(seconds: 3));
+    await _flush(tester);
     expect(session.players, hasLength(3));
+    // 末章播完：不再连播，改为官方 `v7` 的书末提示。
     session.players.last.emitCompleted();
     await _flush(tester);
     expect(session.players, hasLength(3));
     expect(session.players.last.isPlaying, false);
     expect(session.store.entry?['completed'], true);
     expect(session.store.entry?['position'], 120);
-    expect(find.text('本章已播完'), findsOneWidget);
+    expect(find.text('已播完最新章节，去听听其它内容吧'), findsOneWidget);
     await tester.tap(find.byTooltip('播放'));
     await _flush(tester);
     expect(session.players.last.position, Duration.zero);
     expect(session.players.last.isPlaying, true);
+  });
+
+  testWidgets('cancelling the advance countdown stays on the chapter', (
+    tester,
+  ) async {
+    final session = _Session();
+    await _mount(tester, session);
+    session.players.first.emitCompleted();
+    await _flush(tester);
+    expect(find.byKey(const Key('audio_advance_banner')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('audio_advance_cancel')));
+    await _flush(tester);
+    expect(find.byKey(const Key('audio_advance_banner')), findsNothing);
+
+    // 取消之后即使等过倒计时窗口，也不能自己跳章。
+    await tester.pump(const Duration(seconds: 5));
+    await _flush(tester);
+    expect(session.players, hasLength(1));
+    expect(find.text('本章已播完'), findsOneWidget);
   });
 
   testWidgets(
@@ -223,6 +252,33 @@ void main() {
       expect(session.store.entry?['completed'], true);
     },
   );
+
+  testWidgets('the playback settings sheet separates itself from the page', (
+    tester,
+  ) async {
+    themeModeNotifier.value = ThemeMode.dark;
+    oledModeNotifier.value = true;
+    addTearDown(() {
+      oledModeNotifier.value = false;
+      themeModeNotifier.value = ThemeMode.system;
+    });
+    final session = _Session();
+    await _mount(
+      tester,
+      session,
+      theme: AppTheme.createTheme(Brightness.dark, oledMode: true),
+    );
+    await tester.tap(find.byTooltip('更多'));
+    await tester.pumpAndSettle();
+
+    final sheet = tester.widget<BottomSheet>(find.byType(BottomSheet));
+    // 听书页是纯黑画布，barrier 叠在上面不会变暗；弹层必须比画布高一档，
+    // 再加一圈发丝线，才能看出设置和听书页的分界。
+    expect(sheet.backgroundColor, const Color(0xFF0C0C0E));
+    final shape = sheet.shape! as RoundedRectangleBorder;
+    expect(shape.side.width, 0.8);
+    expect(shape.side.color.a, closeTo(0.8, 0.01));
+  });
 
   testWidgets(
     'completed history stays paused and replays only when requested',
@@ -439,9 +495,11 @@ void main() {
     await tester.ensureVisible(find.byKey(const ValueKey('audio-speed')));
     await tester.tap(find.byKey(const ValueKey('audio-speed')));
     await tester.pumpAndSettle();
-    final speed = find.text('1.5×');
-    await tester.ensureVisible(speed);
-    await tester.tap(speed);
+    // 语速面板是可拖的滑条（0.1 一档），没有固定档位按钮可点：直接把 1.5
+    // 交给 onChanged，等价于把滑块拖到 1.5。
+    tester
+        .widget<Slider>(find.byKey(const ValueKey('audio-speed-slider')))
+        .onChanged!(1.5);
     await _flush(tester);
     await tester.pumpAndSettle();
     expect(session.players.single.rate, 1.5);
@@ -592,9 +650,13 @@ void main() {
       await tester.ensureVisible(find.byKey(const ValueKey('audio-speed')));
       await tester.tap(find.byKey(const ValueKey('audio-speed')));
       await tester.pumpAndSettle();
-      final speed = find.text('1.5×');
-      await tester.ensureVisible(speed);
-      await tester.tap(speed);
+      tester
+          .widget<Slider>(find.byKey(const ValueKey('audio-speed-slider')))
+          .onChanged!(1.5);
+      await tester.pumpAndSettle();
+      // 新面板是即时生效的滑条，选完不会自动关；先关掉再点「下一章」，
+      // 否则点击会落在面板的遮罩上。
+      await tester.tapAt(const Offset(20, 20));
       await tester.pumpAndSettle();
       await tester.ensureVisible(find.byTooltip('下一章'));
       await tester.tap(find.byTooltip('下一章'));
@@ -821,7 +883,7 @@ void main() {
     await _mount(tester, session);
     final player = session.players.single;
     expect(player.isPlaying, true);
-    await tester.tap(find.byTooltip('定时'));
+    await tester.tap(find.byKey(const Key('audio_sleep')));
     await tester.pumpAndSettle();
     await tester.tap(find.text('15 分钟后'));
     await tester.pumpAndSettle();
@@ -867,7 +929,11 @@ Future<void> _unmount(WidgetTester tester) async {
   await _flush(tester);
 }
 
-Future<void> _mount(WidgetTester tester, _Session session) async {
+Future<void> _mount(
+  WidgetTester tester,
+  _Session session, {
+  ThemeData? theme,
+}) async {
   await tester.binding.setSurfaceSize(const Size(430, 932));
   tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
   addTearDown(() async {
@@ -875,7 +941,7 @@ Future<void> _mount(WidgetTester tester, _Session session) async {
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
     await tester.binding.setSurfaceSize(null);
   });
-  await tester.pumpWidget(session.app());
+  await tester.pumpWidget(session.app(theme: theme));
   await _flush(tester);
 }
 
@@ -937,7 +1003,8 @@ class _Session {
                Chapter(itemId: '$index', title: '第$index章', volumeName: '第一卷'),
            ];
 
-  Widget app() => MaterialApp(
+  Widget app({ThemeData? theme}) => MaterialApp(
+    theme: theme,
     home: AudioPage(
       bookId: 'book',
       title: '测试听书',

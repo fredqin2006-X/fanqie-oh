@@ -9,19 +9,24 @@ import '../home/home_media_card.dart';
 /// Detail-page masthead: the cover sits on the left with the title, metadata
 /// and origin badge stacked to its right, matching the official layout.
 ///
-/// Only the tinted backdrop follows the scroll offset; the text does not
-/// rebuild per frame. The title deliberately has no `maxLines` so it always
-/// wraps in full rather than truncating.
+/// The text does not rebuild per frame. The tinted backdrop lives on the page
+/// itself ([DetailMastheadWash]) so the title bar cannot cut it in two.
+/// The title deliberately has no `maxLines` so it always wraps in full rather
+/// than truncating.
 class DetailHero extends StatelessWidget {
   final MediaItem item;
   final BookDetail? detail;
-  final ScrollController scroll;
+
+  /// 桌面两栏布局：去掉顶部色块，封面放大并整体居中。
+  final bool desktop;
+  final bool compactDesktop;
 
   const DetailHero({
     super.key,
     required this.item,
-    required this.scroll,
     this.detail,
+    this.desktop = false,
+    this.compactDesktop = false,
   });
 
   @override
@@ -33,15 +38,22 @@ class DetailHero extends StatelessWidget {
     // phone, so the masthead stacks instead of squeezing both into one row.
     final stacked = MediaQuery.textScalerOf(context).scale(16) > 26;
 
-    final cover = _CoverTile(item: item, detail: detail);
+    final cover = _CoverTile(
+      item: item,
+      detail: detail,
+      desktop: desktop,
+      compact: compactDesktop,
+    );
     final info = Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: desktop && !compactDesktop
+          ? CrossAxisAlignment.center
+          : CrossAxisAlignment.start,
       children: [
         _BookTitle(
           text: title,
           style: TextStyle(
             color: palette.ink,
-            fontSize: 20,
+            fontSize: desktop ? 22 : 20,
             fontWeight: FontWeight.w700,
             height: 1.35,
             letterSpacing: -0.4,
@@ -52,7 +64,11 @@ class DetailHero extends StatelessWidget {
           Text(
             meta.join(' · '),
             key: const Key('detail_meta_line'),
-            style: TextStyle(color: palette.muted, fontSize: 12.5, height: 1.4),
+            style: TextStyle(
+              color: palette.muted,
+              fontSize: desktop ? 13 : 12.5,
+              height: desktop ? 1.6 : 1.4,
+            ),
           ),
         ],
         if (detail?.original == true) ...[
@@ -65,47 +81,33 @@ class DetailHero extends StatelessWidget {
     return ClipRect(
       child: Stack(
         children: [
-          // Tinted masthead wash. Kept to its own layer so scrolling repaints
-          // only this gradient.
-          Positioned.fill(
-            child: ExcludeSemantics(
-              child: RepaintBoundary(
-                child: AnimatedBuilder(
-                  animation: scroll,
-                  builder: (context, _) => CustomPaint(
-                    painter: _MastheadWash(
-                      palette: palette,
-                      shift: scroll.hasClients ? scroll.offset : 0,
+          // Smooth bottom blend gradient fading seamlessly to canvas
+          if (!desktop)
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              height: 56,
+              child: ExcludeSemantics(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [
+                        palette.canvas.withValues(alpha: 0),
+                        palette.canvas,
+                      ],
                     ),
                   ),
                 ),
               ),
             ),
-          ),
-          // Smooth bottom blend gradient fading seamlessly to canvas
-          Positioned(
-            left: 0,
-            right: 0,
-            bottom: 0,
-            height: 56,
-            child: ExcludeSemantics(
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    colors: [
-                      palette.canvas.withValues(alpha: 0),
-                      palette.canvas,
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ),
           Padding(
-            padding: const EdgeInsets.fromLTRB(20, 6, 20, 22),
-            child: stacked
+            padding: desktop
+                ? const EdgeInsets.fromLTRB(0, 16, 0, 0)
+                : const EdgeInsets.fromLTRB(20, 6, 20, 22),
+            child: (stacked || (desktop && !compactDesktop))
                 ? Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -134,7 +136,16 @@ class _CoverTile extends StatelessWidget {
   final MediaItem item;
   final BookDetail? detail;
 
-  const _CoverTile({required this.item, this.detail});
+  /// 桌面两栏布局：封面放大到 168×224。
+  final bool desktop;
+
+  final bool compact;
+  const _CoverTile({
+    required this.item,
+    this.detail,
+    this.desktop = false,
+    this.compact = false,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -142,7 +153,9 @@ class _CoverTile extends StatelessWidget {
     final scaler = MediaQuery.textScalerOf(context);
     // The cover keeps its 3:4 ratio; it only grows a little with text scale so
     // the text column is never starved of width.
-    final width = 104.0 + (scaler.scale(16) - 16).clamp(0.0, 10.0) * 1.2;
+    final width =
+        (desktop ? (compact ? 112.0 : 168.0) : 104.0) +
+        (scaler.scale(16) - 16).clamp(0.0, 10.0) * 1.2;
     return SizedBox(
       width: width,
       child: HomePressable(
@@ -235,18 +248,16 @@ class _OriginBadge extends StatelessWidget {
         color: HomePalette.accent.withValues(alpha: palette.dark ? 0.18 : 0.10),
         borderRadius: BorderRadius.circular(6),
         border: Border.all(
-          color: HomePalette.accent.withValues(alpha: palette.dark ? 0.32 : 0.22),
+          color: HomePalette.accent.withValues(
+            alpha: palette.dark ? 0.32 : 0.22,
+          ),
           width: 0.6,
         ),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(
-            LucideIcons.sparkles,
-            size: 11,
-            color: palette.accentText,
-          ),
+          Icon(LucideIcons.sparkles, size: 11, color: palette.accentText),
           const SizedBox(width: 4),
           Text(
             '原创',
@@ -326,18 +337,94 @@ class _BookTitle extends StatelessWidget {
   );
 }
 
+/// 页面顶部的暖光层。由页面铺在 AppBar 后面，从屏幕最顶端开始淡出，标题
+/// 栏就不会再把它截成一条硬边。只跟随滚动轻微上提，不重建正文。
+///
+/// 渐变只画一次，滚动时只做 [Transform.translate]。若把滚动量塞进
+/// painter，每个滚动帧都要重建 shader 并整条重绘，而这张渐变在滚动中
+/// 其实从不改变。
+///
+/// 浅色和深色 / OLED 都保留这层暖光（深色的红色渐变是对的，也是浅色纸面
+/// 的参照）；只有墨水屏要纯白画布，不创建 painter。
+class DetailMastheadWash extends StatelessWidget {
+  final ScrollController scroll;
+
+  const DetailMastheadWash({super.key, required this.scroll});
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = HomePalette.of(context);
+    if (palette.eink) return const SizedBox.shrink();
+    final reducedMotion = MediaQuery.disableAnimationsOf(context);
+    return ExcludeSemantics(
+      child: IgnorePointer(
+        child: LayoutBuilder(
+          builder: (context, constraints) => RepaintBoundary(
+            key: const Key('detail_masthead_wash'),
+            child: Stack(
+              clipBehavior: Clip.hardEdge,
+              children: [
+                Positioned(
+                  left: 0,
+                  top: 0,
+                  right: 0,
+                  // 层高多留一截上提的余量，平移后底部不会露出没画的画布。
+                  height: constraints.maxHeight + _mastheadLiftMax,
+                  child: AnimatedBuilder(
+                    animation: scroll,
+                    // 画出渐变的那层是 child：滚动只移动它，不重建 painter。
+                    child: RepaintBoundary(
+                      child: CustomPaint(
+                        painter: _MastheadWash(
+                          palette: palette,
+                          height: constraints.maxHeight,
+                        ),
+                      ),
+                    ),
+                    builder: (context, child) => Transform.translate(
+                      offset: Offset(
+                        0,
+                        reducedMotion ? 0 : -_mastheadLift(scroll),
+                      ),
+                      child: child,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 暖光最多上提这么多：原先把滚动量直接喂给 painter 时也是 240 × 0.22。
+const double _mastheadLiftMax = 240 * 0.22;
+
+double _mastheadLift(ScrollController scroll) {
+  if (!scroll.hasClients) return 0;
+  return scroll.offset.clamp(0.0, 240.0) * 0.22;
+}
+
 /// Soft accent wash behind the masthead, fading into the page background.
-/// It lifts slightly as the page scrolls, then stops.
+/// It lifts slightly as the page scrolls, then stops —— 上提由外层
+/// [Transform.translate] 完成，这里只画静止的渐变。
+///
+/// [height] 是它自己的可见高度：多留出来的上提余量不能算进渐变长度，
+/// 否则同一条渐变会被拉长，越滚越淡。
+///
+/// 深色 / OLED 用更强的 alpha，浅色纸面用轻一档的；墨水屏不创建这个 painter
+/// （见 [DetailMastheadWash]）。
 class _MastheadWash extends CustomPainter {
   final HomePalette palette;
-  final double shift;
+  final double height;
 
-  const _MastheadWash({required this.palette, required this.shift});
+  const _MastheadWash({required this.palette, required this.height});
 
   @override
   void paint(Canvas canvas, Size size) {
-    final lift = shift.clamp(0.0, 240.0) * 0.22;
-    final rect = Offset.zero & size;
+    final rect = Rect.fromLTWH(0, 0, size.width, height);
     final paint = Paint()
       ..shader = LinearGradient(
         begin: Alignment.topCenter,
@@ -348,13 +435,16 @@ class _MastheadWash extends CustomPainter {
           palette.canvas.withValues(alpha: 0),
         ],
         stops: const [0, 0.5, 1],
-      ).createShader(rect.translate(0, -lift));
+      ).createShader(rect);
     canvas.drawRect(rect, paint);
   }
 
   @override
   bool shouldRepaint(_MastheadWash oldDelegate) =>
-      oldDelegate.palette.dark != palette.dark || oldDelegate.shift != shift;
+      oldDelegate.height != height ||
+      oldDelegate.palette.dark != palette.dark ||
+      oldDelegate.palette.oled != palette.oled ||
+      oldDelegate.palette.canvas != palette.canvas;
 }
 
 Future<void> showDetailCover(BuildContext context, MediaItem item) =>

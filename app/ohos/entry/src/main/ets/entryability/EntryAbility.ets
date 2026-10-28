@@ -8,6 +8,8 @@ import { DocumentPlugin } from '../platform/DocumentPlugin';
 import { ReaderPlugin, WindowPolicy } from '../platform/ReaderPlugin';
 import { SystemTtsPlugin } from '../platform/SystemTtsPlugin';
 import { DisplayPlugin } from '../platform/DisplayPlugin';
+import { FanqieAccountPlugin } from '../platform/FanqieAccountPlugin';
+import { VolumeKeyPlugin } from '../platform/VolumeKeyPlugin';
 
 export default class EntryAbility extends FlutterAbility {
   configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -24,5 +26,7 @@ export default class EntryAbility extends FlutterAbility {
     plugins.add(new SystemTtsPlugin())
     plugins.add(new NativePlayerPlugin(this.context, windowPolicy))
     plugins.add(new DisplayPlugin(this.context))
+    plugins.add(new FanqieAccountPlugin(this.context))
+    plugins.add(new VolumeKeyPlugin(this.context))
   }
 }

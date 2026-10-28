@@ -1,3 +1,4 @@
+import 'platform_channel.dart';
 import 'dart:async';
 
 import 'package:flutter/services.dart';
@@ -5,12 +6,16 @@ import 'package:flutter/widgets.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/media_item.dart';
+import '../models/text_replacement_rule.dart';
+import 'text_replacement_engine.dart';
+import 'text_replacement_store.dart';
 import 'api_client.dart';
 import 'audio_preferences.dart';
 import 'backend_transport.dart';
 import 'chapter_cache_store.dart';
 import 'chapter_text_formatter.dart';
 import 'listening_session.dart';
+import 'narration_sentence.dart';
 import 'native_player.dart';
 
 class SystemTtsEngine {
@@ -20,8 +25,8 @@ class SystemTtsEngine {
 }
 
 class SystemTts {
-  static const _channel = MethodChannel('fqapp/system_tts');
-  static const _events = EventChannel('fqapp/system_tts_events');
+  static const _channel = AppMethodChannel('fqapp/system_tts');
+  static const _events = AppEventChannel('fqapp/system_tts_events');
   static final events = _events.receiveBroadcastStream();
 
   static Future<T?> _call<T>(String method, [Object? arguments]) => _channel
@@ -47,8 +52,11 @@ class SystemTts {
         'rate': prefs.rate,
       }) ??
       4000;
-  static Future<void> speak(String text, String id) =>
-      _call<void>('speak', {'text': text, 'id': id});
+  /// Speaks [text] as utterance [id]. [queue] appends it behind the utterance
+  /// already playing instead of cutting it off, which is what lets one sentence
+  /// follow the previous one without a gap.
+  static Future<void> speak(String text, String id, {bool queue = false}) =>
+      _call<void>('speak', {'text': text, 'id': id, 'queue': queue});
   static Future<void> stop() => _call<void>('stop');
   static Future<void> shutdown() => _call<void>('shutdown');
   static Future<void> openSettings() => _call<void>('settings');
@@ -72,7 +80,7 @@ class SystemTtsPreferences {
     final rate = sp.getDouble('system_tts_rate') ?? 1;
     return SystemTtsPreferences(
       engine: sp.getString('system_tts_engine'),
-      rate: rate.isFinite ? rate.clamp(0.5, 2) : 1,
+      rate: rate.isFinite ? rate.clamp(0.5, 3) : 1,
     );
   }
 
@@ -93,6 +101,7 @@ class SystemTtsBook {
   SystemTtsBook({
     required this.bookId,
     required this.title,
+    this.coverUrl = '',
     required List<Chapter> chapters,
     required this.startIndex,
     required this.initialContent,
@@ -100,10 +109,22 @@ class SystemTtsBook {
     this.localOnly = false,
     this.textLoader,
     this.cache,
-  }) : chapters = List.unmodifiable(chapters);
+    TextReplacementSnapshot? replacementSnapshot,
+    TextReplacementStore? replacementStore,
+  }) : replacementStore = replacementStore ?? TextReplacementStore.instance,
+       replacementSnapshot =
+           replacementSnapshot ??
+           (replacementStore ?? TextReplacementStore.instance).snapshot,
+       chapters = List.unmodifiable(chapters);
 
   final String bookId;
   final String title;
+
+  /// 当前书的封面地址：交给 `ListenKeepAliveService` 当通知大图与媒体卡封面，
+  /// 与听书走同一条通路（官方 `dn2/i.java` 的 `setLargeIcon`）。空串时退回
+  /// 应用图标。
+  final String coverUrl;
+
   final List<Chapter> chapters;
   final int startIndex;
   final ChapterContent initialContent;
@@ -111,6 +132,22 @@ class SystemTtsBook {
   final bool localOnly;
   final Future<String> Function(Chapter)? textLoader;
   final ChapterCache? cache;
+  final TextReplacementSnapshot replacementSnapshot;
+  final TextReplacementStore replacementStore;
+
+  Future<TextReplacementResult> loadDisplay(
+    int index, {
+    BackendRequest? request,
+    TextReplacementCancellation? cancellation,
+  }) async {
+    final content = await load(index, request: request);
+    return TextReplacementEngine.instance.transform(
+      source: content,
+      chapterTitle: chapters[index].title,
+      snapshot: replacementSnapshot,
+      cancellation: cancellation,
+    );
+  }
 
   Future<ChapterContent> load(int index, {BackendRequest? request}) async {
     if (index == startIndex) return initialContent;
@@ -173,14 +210,37 @@ class SystemTtsPlayback extends ChangeNotifier with WidgetsBindingObserver {
   int _generation = 0;
   int _serial = 0;
   int _maxLength = 300;
-  String? _id;
+
+  /// Utterances already handed to the engine, keyed by utterance id. One
+  /// sentence each: most Chinese voices never report progress inside an
+  /// utterance, so the sentence is the finest wash the reader can get.
+  final Map<String, ({int start, int end})> _queued = {};
+
+  /// Id of the utterance the engine has started. Events from utterances still
+  /// waiting in its queue must not move the highlight.
+  String? _speakingId;
+
+  /// First character not yet handed to the engine.
+  int _cursor = 0;
+
+  /// The next `speak` must replace the engine queue instead of appending.
+  bool _flushing = true;
   bool _ready = false;
   bool _started = false;
+
+  /// Whether the current piece has reported an `onRangeStart`. This no longer
+  /// decides the wash — a piece is one sentence — but it keeps [_offset]
+  /// tracking the voice inside a long sentence, so progress and the follow
+  /// page do not lag behind by a whole sentence.
+  bool _rangeSeen = false;
+  bool _rangeCapable = false;
   bool _appActive = true;
   StreamSubscription<dynamic>? _subscription;
   Future<void> _notificationQueue = Future<void>.value();
+  Future<void> _pumps = Future<void>.value();
   Future<void>? _closeFuture;
   BackendRequest? _loadRequest;
+  TextReplacementCancellation? _replacementCancellation;
 
   Chapter get chapter => book.chapters[index];
   double get progress =>
@@ -191,7 +251,15 @@ class SystemTtsPlayback extends ChangeNotifier with WidgetsBindingObserver {
   void start() {
     if (_started || closed) return;
     _started = true;
+    // Rule updates can occur while this book waits for history or ownership,
+    // before this session has subscribed to future changes.
+    if (book.replacementStore.snapshot.revision !=
+        book.replacementSnapshot.revision) {
+      _replacementChanged();
+      return;
+    }
     WidgetsBinding.instance.addObserver(this);
+    book.replacementStore.changes.addListener(_replacementChanged);
     _appActive =
         WidgetsBinding.instance.lifecycleState == null ||
         WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
@@ -226,21 +294,28 @@ class SystemTtsPlayback extends ChangeNotifier with WidgetsBindingObserver {
     if (closed || next < 0 || next >= book.chapters.length) return;
     final token = ++_generation;
     _loadRequest?.cancel();
+    _replacementCancellation?.cancel();
+    final cancellation = _replacementCancellation =
+        TextReplacementCancellation();
     final request = _loadRequest = BackendRequest();
-    _id = null;
+    _resetQueue(_offset);
     wantPlay = _allowed;
     loading = true;
     completed = false;
     error = null;
     index = next;
     _text = '';
+    // The old piece belongs to the previous chapter's coordinates; keeping it
+    // would let the reader paint a range that now points into other text.
+    _pieceStart = 0;
+    _pieceEnd = 0;
     _offset = offset;
     _publish();
     try {
       await SystemTts.stop();
       if (closed || token != _generation) return;
       final content = await book
-          .load(next, request: request)
+          .loadDisplay(next, request: request, cancellation: cancellation)
           .timeout(
             const Duration(seconds: 30),
             onTimeout: () {
@@ -249,7 +324,11 @@ class SystemTtsPlayback extends ChangeNotifier with WidgetsBindingObserver {
             },
           );
       if (closed || token != _generation) return;
-      _text = SystemTtsBook.plainText(content, chapter.title);
+      _text = content
+          .bodyBlocks(chapter.title)
+          .whereType<ChapterParagraph>()
+          .map((p) => p.text)
+          .join('\n');
       if (_text.trim().isEmpty) throw StateError('本章没有可朗读的文字');
       _offset = _safeOffset(_offset.clamp(0, _text.length));
       loading = false;
@@ -278,7 +357,9 @@ class SystemTtsPlayback extends ChangeNotifier with WidgetsBindingObserver {
       _ready = true;
     }
     loading = false;
-    await _speak(token);
+    _resetQueue(_offset);
+    _schedulePump(token);
+    await _pumps;
   }
 
   bool _current(int token) =>
@@ -292,35 +373,85 @@ class SystemTtsPlayback extends ChangeNotifier with WidgetsBindingObserver {
     return offset;
   }
 
-  Future<void> _speak(int token) async {
-    if (!_current(token)) return;
-    if (_offset >= _text.length) {
-      if (index + 1 < book.chapters.length) {
-        await openChapter(index + 1);
-      } else {
-        completed = true;
-        await pause();
+  /// Drops the engine side of the session and rewinds the enqueue cursor.
+  void _resetQueue(int offset) {
+    _queued.clear();
+    _speakingId = null;
+    _cursor = offset;
+    _flushing = true;
+  }
+
+  /// Keeps the engine queue one sentence ahead of the voice.
+  ///
+  /// Speaking a sentence and waiting for `done` before the next one leaves an
+  /// audible hole every few seconds, so the next utterance is appended while
+  /// the current one plays. One ahead is enough to hide the start latency and
+  /// still stops promptly.
+  Future<void> _pump(int token) async {
+    // Re-checked per sentence: a pause inside the loop must not enqueue more.
+    while (_current(token) && _queued.length < 2) {
+      final range = nextSentenceRange(_text, _cursor, maxLength: _maxLength);
+      if (range == null) return;
+      _cursor = range.end;
+      final id = '${identityHashCode(this)}-${++_serial}';
+      _queued[id] = range;
+      final flush = _flushing;
+      if (flush) {
+        _flushing = false;
+        // The first utterance of a position is the one that will speak, so it
+        // owns the reader from here on: some engines never fire `onStart`, and
+        // their range callbacks would otherwise have no owner to attach to.
+        _show(id, range);
+        // Android 15+ requires foreground eligibility before requesting audio
+        // focus.
+        await _notificationQueue;
+        if (!_current(token) || !_queued.containsKey(id)) return;
       }
-      return;
+      await SystemTts.speak(
+        _text.substring(range.start, range.end),
+        id,
+        queue: !flush,
+      );
+      if (!_current(token)) return;
     }
-    _pieceStart = _offset;
-    var end = _safeOffset((_offset + _maxLength).clamp(0, _text.length));
-    // Short sentence-sized requests bound the rewind on engines without range
-    // callbacks. Never split a UTF-16 surrogate pair at either boundary.
-    for (var i = end - 1; i > _offset; i--) {
-      if ('。！？!?；;\n'.contains(_text[i])) {
-        end = i + 1;
-        break;
-      }
-    }
-    _pieceEnd = end;
-    final id = '${identityHashCode(this)}-${++_serial}';
-    _id = id;
+  }
+
+  /// Serializes [_pump]. Two overlapping runs would append a sentence behind
+  /// the one a pending flush is about to replace: the engine drops it and the
+  /// reader waits for a `done` that never comes.
+  void _schedulePump(int token) {
+    _pumps = _pumps.then((_) => _pump(token)).catchError((Object e) async {
+      if (!closed && token == _generation) await _fail(e);
+    });
+  }
+
+  /// Points the reader at [id] and publishes its sentence.
+  void _show(String id, ({int start, int end}) range) {
+    if (_rangeSeen) _rangeCapable = true;
+    _rangeSeen = false;
+    _speakingId = id;
+    _pieceStart = range.start;
+    _pieceEnd = range.end;
+    _offset = range.start;
     _publish();
-    // Android 15+ requires foreground eligibility before requesting audio focus.
-    await _notificationQueue;
-    if (!_current(token) || _id != id) return;
-    await SystemTts.speak(_text.substring(_pieceStart, end), id);
+  }
+
+  MapEntry<String, ({int start, int end})>? _earliest() {
+    MapEntry<String, ({int start, int end})>? best;
+    for (final entry in _queued.entries) {
+      if (best == null || entry.value.start < best.value.start) best = entry;
+    }
+    return best;
+  }
+
+  Future<void> _advance(int token) async {
+    if (!_current(token)) return;
+    if (index + 1 < book.chapters.length) {
+      await openChapter(index + 1);
+    } else {
+      completed = true;
+      await pause();
+    }
   }
 
   void _event(dynamic value) {
@@ -329,23 +460,49 @@ class SystemTtsPlayback extends ChangeNotifier with WidgetsBindingObserver {
       unawaited(pause());
       return;
     }
-    if (_id == null || value['id'] != _id) return;
+    final id = value['id'];
+    if (id is! String) return;
+    final range = _queued[id];
+    // A queued utterance that has not started yet, or a callback from the
+    // piece that is already behind us: neither may move the reader.
+    if (range == null && id != _speakingId) return;
     switch (value['type']) {
+      case 'start':
+        if (range != null) _show(id, range);
+        _schedulePump(_generation);
       case 'range':
         final start = value['start'];
-        if (start is int && start >= 0 && start < _pieceEnd - _pieceStart) {
-          _offset = _safeOffset(_pieceStart + start);
-          _publish(notification: false);
+        if (range == null ||
+            id != _speakingId ||
+            start is! int ||
+            start < 0 ||
+            start >= range.end - range.start) {
+          return;
         }
+        _rangeSeen = true;
+        _offset = _safeOffset(range.start + start);
+        _publish(notification: false);
       case 'done':
-        _id = null;
-        _offset = _pieceEnd;
-        final token = _generation;
-        unawaited(
-          _speak(token).catchError((Object e) async {
-            if (!closed && token == _generation) await _fail(e);
-          }),
-        );
+        _queued.remove(id);
+        if (_speakingId == id) _speakingId = null;
+        if (range != null) _offset = range.end;
+        // Engines that never call `onRangeStart` still fire `done`, so the
+        // highlight is advanced here as well — the next sentence is already
+        // playing by the time this lands.
+        final next = _earliest();
+        if (next != null) {
+          _show(next.key, next.value);
+        } else if (nextSentenceRange(
+              _text,
+              _cursor,
+              maxLength: _maxLength,
+            ) ==
+            null) {
+          final token = _generation;
+          unawaited(_advance(token));
+          return;
+        }
+        _schedulePump(_generation);
       case 'error':
         unawaited(_fail(StateError('引擎朗读失败，请检查音色或网络后重试')));
       case 'interrupted':
@@ -379,7 +536,7 @@ class SystemTtsPlayback extends ChangeNotifier with WidgetsBindingObserver {
     if (closed) return;
     ++_generation;
     _loadRequest?.cancel();
-    _id = null;
+    _resetQueue(_offset);
     wantPlay = false;
     loading = false;
     _publish();
@@ -405,6 +562,14 @@ class SystemTtsPlayback extends ChangeNotifier with WidgetsBindingObserver {
       duration: Duration.zero,
       playing: wantPlay && !loading && error == null,
       textProgress: progress,
+      textReplacementRevision: book.replacementSnapshot.revision,
+      sentenceRange: sentenceHighlightRange(
+        _text,
+        offset: _offset,
+        pieceStart: _pieceStart,
+        pieceEnd: _pieceEnd,
+        precise: _rangeCapable || _rangeSeen,
+      ),
     );
     notifyListeners();
     if (notification) {
@@ -416,6 +581,7 @@ class SystemTtsPlayback extends ChangeNotifier with WidgetsBindingObserver {
           await NativePlayer.startListenForeground(
             title: book.title,
             episode: '系统朗读 · ${chapter.title}',
+            coverUrl: book.coverUrl,
             playing: wantPlay && !loading && error == null,
             hasPrev: index > 0,
             hasNext: index + 1 < book.chapters.length,
@@ -423,6 +589,17 @@ class SystemTtsPlayback extends ChangeNotifier with WidgetsBindingObserver {
         }
       });
     }
+  }
+
+  void _replacementChanged() {
+    if (closed ||
+        book.replacementStore.snapshot.revision ==
+            book.replacementSnapshot.revision) {
+      return;
+    }
+    // The owner also closes this session; close() is idempotent.
+    unawaited(close());
+    onStop();
   }
 
   void _preferencesChanged() {
@@ -444,9 +621,11 @@ class SystemTtsPlayback extends ChangeNotifier with WidgetsBindingObserver {
 
   Future<void> _close() async {
     closed = true;
+    _replacementCancellation?.cancel();
+    book.replacementStore.changes.removeListener(_replacementChanged);
     ++_generation;
     _loadRequest?.cancel();
-    _id = null;
+    _resetQueue(_offset);
     wantPlay = false;
     WidgetsBinding.instance.removeObserver(this);
     AudioPreferences.instance.backgroundPlayback.removeListener(

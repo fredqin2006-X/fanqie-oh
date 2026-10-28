@@ -1,6 +1,7 @@
 
 import common from '@ohos.app.ability.common';
 import { FlutterPage } from '@ohos/flutter_ohos'
+import { VolumeKeyPlugin } from '../platform/VolumeKeyPlugin'
 
 let storage = LocalStorage.getShared()
 const EVENT_BACK_PRESS = 'EVENT_BACK_PRESS'
@@ -15,6 +16,7 @@ struct Index {
     Column() {
       FlutterPage({ viewId: this.viewId })
     }
+    .onKeyEventDispatch((event: KeyEvent) => VolumeKeyPlugin.dispatch(event))
   }
 
   onBackPress(): boolean {

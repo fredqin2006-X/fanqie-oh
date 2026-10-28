@@ -1,3 +1,4 @@
+import 'platform_channel.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -7,6 +8,8 @@ import 'package:flutter/services.dart';
 
 import 'app_log.dart';
 import 'backend_service.dart';
+import 'audio_preferences.dart';
+import 'player_preferences.dart';
 
 // Codec metadata only: never log the whole platform payload or exception text.
 final _decoderToken = RegExp(r'^[A-Za-z0-9_.+/-]{1,160}$');
@@ -59,10 +62,10 @@ class NativePlaybackException implements Exception {
 
 /// Flutter-side wrapper of the native ExoPlayer host.
 class NativePlayer {
-  // OHOS audio playback must not allocate a Flutter video surface.
-  bool audioOnly = false;
-  static const _channel = MethodChannel('fqapp/native_player');
-  static const _events = EventChannel('fqapp/native_player/events');
+  NativePlayer({this.audioOnly = false});
+
+  static const _channel = AppMethodChannel('fqapp/native_player');
+  static const _events = AppEventChannel('fqapp/native_player/events');
   static const _methodTimeout = Duration(seconds: 10);
   static const _createTimeout = Duration(seconds: 25);
 
@@ -203,11 +206,13 @@ class NativePlayer {
     return null;
   }
 
-  static Future<Map<Object?, Object?>?> readVideoFrame(int playerId, int serial) =>
-      _channel.invokeMapMethod<Object?, Object?>('videoFrame', {
-        'id': playerId,
-        'serial': serial,
-      });
+  static Future<Map<Object?, Object?>?> readVideoFrame(
+    int playerId,
+    int serial,
+  ) => _channel.invokeMapMethod<Object?, Object?>('videoFrame', {
+    'id': playerId,
+    'serial': serial,
+  });
 
   bool _disposed = false;
   bool _creationFailed = false;
@@ -216,13 +221,22 @@ class NativePlayer {
   Future<void>? _nativeRelease;
   int _seekGeneration = 0;
   int _appliedSeekGeneration = 0;
+  int _volumeGeneration = 0;
+  int _appliedVolumeGeneration = 0;
   int _playWhenReadyGeneration = 0;
 
+  /// 是否纯音频（听书）。原生侧据此决定倍速用哪种变速实现：视频/短剧
+  /// 仍用 Media3 内建的 Sonic，否则视频倍速会跟着变（音频处理与视频渲染
+  /// 必须同步走同一套计时）。见 issue #129。
+  bool audioOnly;
+
   int? get textureId => _textureId;
+  int? get playerId => _playerId;
   bool get isCreated => _textureId != null && !_disposed;
 
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
+  double _volume = 1;
   bool _playing = false;
   bool _playWhenReady = false;
   bool _completed = false;
@@ -235,6 +249,7 @@ class NativePlayer {
 
   Duration get position => _position;
   Duration get duration => _duration;
+  double get volume => _volume;
   bool get playing => _playing;
 
   /// Playback intent stays true while ExoPlayer is buffering or suppressed.
@@ -296,10 +311,21 @@ class NativePlayer {
             'cdnUrl': cdnUrl,
             'keyHex': keyHex,
             if (!kIsWeb && Platform.operatingSystem == 'ohos')
-              'audioOnly': audioOnly,
-            if (!kIsWeb && Platform.operatingSystem == 'ohos')
               'loopbackBase': BackendService.instance.webUiEntryUrl
                   .replaceFirst(RegExp(r'/$'), ''),
+            // 解码器偏好必须是**已解析的值**，不能在这里 await 读盘：create 位于
+            // 起播的关键路径上，等 SharedPreferences 会让没有初始化插件的测试
+            // （以及冷启动）一直挂住。偏好由 `DecoderPreferenceCache` 在启动和
+            // 设置变更时维护。
+            'videoDecoder': DecoderPreferenceCache.current.name,
+            // 纯音频播放器才带上变速引擎：视频用内建 Sonic（音频处理与视频
+            // 渲染必须同步计时），只有听书能选系统混音器变速（issue #129）。
+            // 值取内存里的偏好（启动时 load 过），理由与解码器偏好相同：
+            // 起播路径上不能 await 读盘。
+            if (audioOnly) ...{
+              'audioOnly': true,
+              'audioRateEngine': AudioRateEngineCache.current.name,
+            },
           })
           .then((result) async {
             final rawPlayerId = result?['playerId'];
@@ -392,8 +418,17 @@ class NativePlayer {
     _positionCtrl.add(position);
   }
 
-  Future<void> setVolume(double volume) =>
-      _invoke('setVolume', {'volume': volume});
+  Future<void> setVolume(double volume) async {
+    if (_disposed) return;
+    if (!volume.isFinite || volume < 0 || volume > 1) {
+      throw ArgumentError.value(volume, 'volume', 'Must be between 0 and 1');
+    }
+    final generation = ++_volumeGeneration;
+    await _invoke('setVolume', {'volume': volume});
+    if (_disposed || generation <= _appliedVolumeGeneration) return;
+    _appliedVolumeGeneration = generation;
+    _volume = volume;
+  }
 
   Future<void> setRate(double rate) => _invoke('setRate', {'rate': rate});
 
@@ -417,9 +452,15 @@ class NativePlayer {
 
   /// [positionMs] / [durationMs] / [speed] 喂给系统媒体卡片：位置 + 倍速由系统外推，
   /// 总时长决定卡片两侧的时间。缺省 0/0/1 时卡片显示 00:00，所以调用方要尽量给真实值。
+  ///
+  /// [coverUrl] 是当前在读/在听内容的封面地址。官方（`dn2/i.java`
+  /// `PlayNotificationImpl`）把它下载成 Bitmap 后同时写进通知的
+  /// `setLargeIcon` 与媒体会话的 `METADATA_KEY_ALBUM_ART`，系统媒体卡片、
+  /// 锁屏与通知左上角显示的都是它；拿不到或下载失败时退回应用图标。
   static Future<void> startListenForeground({
     required String title,
     required String episode,
+    String coverUrl = '',
     bool playing = true,
     bool hasPrev = true,
     bool hasNext = true,
@@ -435,6 +476,7 @@ class NativePlayer {
       await _channel.invokeMethod<void>('startListenForeground', {
         'title': title,
         'episode': episode,
+        'coverUrl': coverUrl,
         'playing': playing,
         'hasPrev': hasPrev,
         'hasNext': hasNext,
@@ -454,6 +496,121 @@ class NativePlayer {
     } catch (_) {
       // Best effort when channel/platform is unavailable or testing.
     }
+  }
+
+  /// 悬浮窗权限：Android 需要用户在系统设置里允许“显示在其他应用的上层”。
+  static Future<bool> canDrawOverlays() async {
+    try {
+      final granted = await _channel.invokeMethod<bool>('canDrawOverlays');
+      return granted ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 打开系统悬浮窗权限设置页。返回 false 表示当前平台不需要或无法打开。
+  static Future<bool> requestOverlayPermission() async {
+    try {
+      final opened = await _channel.invokeMethod<bool>(
+        'requestOverlayPermission',
+      );
+      return opened ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 开始悬浮窗播放：原生侧启动悬浮窗服务，surface 就绪后把解码画面从
+  /// Flutter 纹理换到悬浮窗；悬浮窗先隐藏，等 Dart 确认切后台后再显示
+  /// （直接在后台启动前台服务会被 Android 12+ 拒绝）。
+  /// 失败时抛错（焦点被占 / 播放器不存在 / 服务启动失败），调用方据此
+  /// 决定不进悬浮、改走切后台暂停。
+  static Future<void> startFloating({
+    required int playerId,
+    required String title,
+    required String episode,
+    bool playing = true,
+    bool hasPrev = true,
+    bool hasNext = true,
+    int positionMs = 0,
+    int durationMs = 0,
+    double speed = 1,
+    int videoWidth = 0,
+    int videoHeight = 0,
+  }) async {
+    await _channel
+        .invokeMethod<void>('startFloating', {
+          'playerId': playerId,
+          'title': title,
+          'episode': episode,
+          'playing': playing,
+          'hasPrev': hasPrev,
+          'hasNext': hasNext,
+          'positionMs': positionMs,
+          'durationMs': durationMs,
+          'speed': speed,
+          'videoWidth': videoWidth,
+          'videoHeight': videoHeight,
+        })
+        .timeout(_methodTimeout);
+  }
+
+  /// 确认切后台，显示悬浮窗。
+  static Future<void> showFloating() async {
+    try {
+      await _channel.invokeMethod<void>('showFloating').timeout(_methodTimeout);
+    } catch (_) {
+      // Best effort when channel/platform is unavailable or testing.
+    }
+  }
+
+  /// 刷新悬浮窗通知 / 控制条的播放状态（切集、播放暂停时调用）。
+  static Future<void> updateFloating({
+    String? title,
+    String? episode,
+    bool? playing,
+    bool? hasPrev,
+    bool? hasNext,
+    int? positionMs,
+    int? durationMs,
+    double? speed,
+  }) async {
+    try {
+      await _channel
+          .invokeMethod<void>('updateFloating', {
+            // 全量传：Kotlin 侧 call.argument 对缺 key 与 null 值都返回
+            // null，行为相同；collection-if 会被 use_null_aware_elements
+            // lint 判 info，CI 把 info 当失败。
+            'title': title,
+            'episode': episode,
+            'playing': playing,
+            'hasPrev': hasPrev,
+            'hasNext': hasNext,
+            'positionMs': positionMs,
+            'durationMs': durationMs,
+            'speed': speed,
+          })
+          .timeout(_methodTimeout);
+    } catch (_) {
+      // Best effort when channel/platform is unavailable or testing.
+    }
+  }
+
+  /// 停悬浮：画面回 Flutter 纹理，停悬浮窗服务。
+  static Future<void> stopFloating() async {
+    try {
+      await _channel.invokeMethod<void>('stopFloating').timeout(_methodTimeout);
+    } catch (_) {
+      // Best effort when channel/platform is unavailable or testing.
+    }
+  }
+
+  /// 后台自动切集：新播放器接手悬浮窗（服务不重启，避免后台启动限制）。
+  /// 接手失败时抛错，调用方只能接受悬浮窗黑屏（旧播放器已销毁）。
+  static Future<void> swapFloatingPlayer({required int playerId}) async {
+    await _channel
+        .invokeMethod<void>('swapFloatingPlayer', {'playerId': playerId})
+        .timeout(_methodTimeout);
   }
 
   Future<void> dispose() => _disposeFuture ??= _dispose();

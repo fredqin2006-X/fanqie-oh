@@ -1,8 +1,11 @@
 //! Loopback HTTP adapter.
 //!
-//! Serves the built-in Web UI, `/src/*` decrypted manga images and the
-//! `/api/*` Web bridge to the same dispatcher the FFI bridge uses, so there is
-//! exactly one business implementation.
+//! Serves `/src/*` cache resources (manga images, clear media, and
+//! CENC-encrypted videos decrypted range by range — P1-7) and the
+//! `/api/v1/*` business routes to the same dispatcher the FFI bridge uses,
+//! so there is exactly one business implementation. External readers
+//! (Legado book sources, local tooling) use this adapter; there is no
+//! built-in Web UI.
 //!
 //! Static file bodies are streamed from disk (with Range support) instead of
 //! being read into memory, so serving a large media file costs a bounded
@@ -13,8 +16,10 @@
 //! let a foreign page read responses) and, when it carries an `Origin`, come
 //! from this listener too (defeats cross-site form POSTs to the device-bound
 //! write routes, which read their arguments from the query string and so need
-//! no CORS preflight). A fresh capability protects every route from other
-//! local apps. See .agents/notes/implemented/bug-fix/2026-10-07-loopback-session.md.
+//! no CORS preflight). Read routes answer any local client without a
+//! capability so external readers (Legado book sources, local tooling) can use
+//! them; device-bound writes still require the per-launch capability. See
+//! .agents/notes/implemented/bug-fix/2026-10-07-loopback-session.md.
 
 use std::sync::Arc;
 
@@ -41,19 +46,41 @@ pub struct LoopbackHandle {
     pub media_cancel: tokio_util::sync::CancellationToken,
 }
 
+/// Which address family the listener accepts connections on.
+///
+/// `Loopback` is the default and keeps the API private to this device.
+/// `Lan` binds every interface so another machine on the same network can
+/// reach the read routes; the Host/Origin guard widens with it (see
+/// [`is_own_authority`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ListenMode {
+    #[default]
+    Loopback,
+    Lan,
+}
+
 #[derive(Clone)]
 struct AppState {
     server: Arc<Server>,
-    /// The bound port, not the requested one: `serve(_, 0)` picks it at bind.
+    /// The bound port, not the requested one: `serve(_, 0, _)` picks it at bind.
     port: u16,
     token: String,
     media: Arc<crate::harmony_media::MediaManager>,
+    mode: ListenMode,
 }
 
-pub async fn serve(server: Arc<Server>, port: u16) -> Result<LoopbackHandle, String> {
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+pub async fn serve(
+    server: Arc<Server>,
+    port: u16,
+    mode: ListenMode,
+) -> Result<LoopbackHandle, String> {
+    let addr = match mode {
+        ListenMode::Loopback => "127.0.0.1",
+        ListenMode::Lan => "0.0.0.0",
+    };
+    let listener = tokio::net::TcpListener::bind((addr, port))
         .await
-        .map_err(|e| format!("listen 127.0.0.1:{port}: {e}"))?;
+        .map_err(|e| format!("listen {addr}:{port}: {e}"))?;
     let local = listener
         .local_addr()
         .map_err(|e| format!("local addr: {e}"))?;
@@ -62,8 +89,11 @@ pub async fn serve(server: Arc<Server>, port: u16) -> Result<LoopbackHandle, Str
         .try_fill_bytes(&mut entropy)
         .map_err(|_| "session entropy unavailable")?;
     let token = hex::encode(entropy);
-    let sandbox = std::path::Path::new(&server.ctx.src_dir).parent().and_then(|p|p.parent())
-        .ok_or("media sandbox unavailable")?.to_path_buf();
+    let sandbox = std::path::Path::new(&server.ctx.src_dir)
+        .parent()
+        .and_then(|p| p.parent())
+        .ok_or("media sandbox unavailable")?
+        .to_path_buf();
     let media = Arc::new(crate::harmony_media::MediaManager::new(sandbox)?);
     let media_cancel = media.cancel.clone();
     let state = AppState {
@@ -71,6 +101,7 @@ pub async fn serve(server: Arc<Server>, port: u16) -> Result<LoopbackHandle, Str
         port: local.port(),
         token: token.clone(),
         media,
+        mode,
     };
     let app = Router::new().fallback(handler).with_state(state);
     let task = tokio::spawn(async move {
@@ -84,35 +115,51 @@ pub async fn serve(server: Arc<Server>, port: u16) -> Result<LoopbackHandle, Str
     })
 }
 
+fn is_loopback_name(host: &str) -> bool {
+    host == "127.0.0.1" || host.eq_ignore_ascii_case("localhost")
+}
+
 /// `authority` (a `Host` value or the part of an `Origin` after the scheme)
 /// names this listener. Hosts compare case-insensitively; the port must be
 /// explicit because the listener never runs on 80.
-fn is_own_authority(authority: &str, port: u16) -> bool {
+///
+/// In `Lan` mode another device addresses this listener by one of the phone's
+/// interface addresses, which the core cannot enumerate without holding the
+/// list stale across a network change. It therefore accepts any **IP
+/// literal** and still refuses every domain name - which is what keeps DNS
+/// rebinding out: an attacker page resolves its own domain to this address, but
+/// the browser then sends that domain in `Host`, and a name never matches.
+fn is_own_authority(authority: &str, port: u16, mode: ListenMode) -> bool {
     let Some((host, p)) = authority.rsplit_once(':') else {
         return false;
     };
-    p.parse::<u16>().ok() == Some(port)
-        && (host == "127.0.0.1" || host.eq_ignore_ascii_case("localhost"))
+    if p.parse::<u16>().ok() != Some(port) {
+        return false;
+    }
+    if is_loopback_name(host) {
+        return true;
+    }
+    mode == ListenMode::Lan && host.parse::<std::net::IpAddr>().is_ok()
 }
 
-fn is_own_origin(origin: &str, port: u16) -> bool {
+fn is_own_origin(origin: &str, port: u16, mode: ListenMode) -> bool {
     origin
         .get(..7)
         .filter(|scheme| scheme.eq_ignore_ascii_case("http://"))
-        .is_some_and(|_| is_own_authority(&origin[7..], port))
+        .is_some_and(|_| is_own_authority(&origin[7..], port, mode))
 }
 
 /// Refusal reason, or `None` when the request may be dispatched. A missing
 /// `Host` is refused (HTTP/1.1 requires it; every real client sends it). A
 /// missing `Origin` is allowed: native clients and same-origin GETs omit it.
 /// `Origin: null` (sandboxed frames, file pages) is foreign.
-fn refusal(headers: &HeaderMap, port: u16) -> Option<&'static str> {
+fn refusal(headers: &HeaderMap, port: u16, mode: ListenMode) -> Option<&'static str> {
     let host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
-    if !host.is_some_and(|h| is_own_authority(h, port)) {
+    if !host.is_some_and(|h| is_own_authority(h, port, mode)) {
         return Some("host not allowed");
     }
     if let Some(origin) = headers.get(header::ORIGIN) {
-        if !origin.to_str().is_ok_and(|o| is_own_origin(o, port)) {
+        if !origin.to_str().is_ok_and(|o| is_own_origin(o, port, mode)) {
             return Some("origin not allowed");
         }
     }
@@ -134,7 +181,7 @@ fn refuse(status: StatusCode, message: &str) -> Response {
 
 async fn handler(State(state): State<AppState>, req: axum::extract::Request) -> Response {
     // Refuse before touching the body so a foreign page cannot make us read it.
-    if let Some(reason) = refusal(req.headers(), state.port) {
+    if let Some(reason) = refusal(req.headers(), state.port, state.mode) {
         return refuse(StatusCode::FORBIDDEN, reason);
     }
     let prefix = format!("/_session/{}", state.token);
@@ -155,36 +202,32 @@ async fn handler(State(state): State<AppState>, req: axum::extract::Request) -> 
         .flat_map(|h| h.split(';'))
         .filter_map(|part| part.trim().split_once('='))
         .any(|(name, value)| name == cookie_name && value == state.token);
-    if scoped.is_none() && bearer != Some(format!("Bearer {}", state.token).as_str()) && !cookie_ok
-    {
+    let request_path = scoped.unwrap_or(path).to_string();
+    // Public reader routes follow the upstream sharing policy. Harmony media
+    // creates native decoding sessions and exposes local files, so every media
+    // route (including stats and streaming GETs) still needs the capability.
+    let capability_ok =
+        scoped.is_some() || bearer == Some(format!("Bearer {}", state.token).as_str()) || cookie_ok;
+    let harmony_media = request_path.starts_with("/harmony-media/");
+    if !capability_ok && (harmony_media || crate::dispatch::requires_capability(&request_path)) {
         return refuse(StatusCode::UNAUTHORIZED, "session required");
     }
-    let request_path = scoped.unwrap_or(path).to_string();
-    if request_path.starts_with("/harmony-media/") {
-        if request_path == "/harmony-media/stats" && req.method() == axum::http::Method::GET {
-            return axum::Json(state.media.stats()).into_response();
-        }
-        let base = format!("http://127.0.0.1:{}/_session/{}",state.port,state.token);
-        let mut response = state.media.handle(&request_path,req,&base).await;
-        response.headers_mut().insert(header::CACHE_CONTROL,HeaderValue::from_static("no-store"));
-        response.headers_mut().insert(header::REFERRER_POLICY,HeaderValue::from_static("no-referrer"));
+    if harmony_media {
+        let mut response =
+            if request_path == "/harmony-media/stats" && req.method() == axum::http::Method::GET {
+                axum::Json(state.media.stats()).into_response()
+            } else {
+                let base = format!("http://127.0.0.1:{}/_session/{}", state.port, state.token);
+                state.media.handle(&request_path, req, &base).await
+            };
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        response.headers_mut().insert(
+            header::REFERRER_POLICY,
+            HeaderValue::from_static("no-referrer"),
+        );
         return response;
-    }
-    let session_cookie = format!(
-        "{cookie_name}={}; Path=/; HttpOnly; SameSite=Strict",
-        state.token
-    );
-    // Clean the entry URL before HTML resolves root-relative links or loads
-    // remote media. The capability is never embedded in Web UI source.
-    if scoped.is_some() && (request_path.is_empty() || request_path == "/") {
-        return Response::builder()
-            .status(StatusCode::SEE_OTHER)
-            .header(header::LOCATION, "/")
-            .header(header::SET_COOKIE, session_cookie)
-            .header(header::REFERRER_POLICY, "no-referrer")
-            .header(header::CACHE_CONTROL, "no-store")
-            .body(Body::empty())
-            .unwrap();
     }
     let declared = req
         .headers()
@@ -262,6 +305,19 @@ async fn handler(State(state): State<AppState>, req: axum::extract::Request) -> 
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
             Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         },
+        ResponseBody::FileDecrypted {
+            path,
+            offset,
+            length,
+            index,
+            key,
+            ..
+        } => match stream_decrypted_file(&path, offset, length, index, &key).await {
+            Ok(body) => builder
+                .body(body)
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+            Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        },
     }
 }
 
@@ -296,6 +352,43 @@ async fn stream_file(path: &std::path::Path, offset: u64, length: u64) -> Result
         limited,
         64 * 1024,
     )))
+}
+
+/// Streams a range of a CENC-encrypted cache file, decrypting each chunk at
+/// its absolute file offset as it passes (P1-7). Chunks arrive sequentially,
+/// and the transform is position-exact, so chunk boundaries do not matter.
+async fn stream_decrypted_file(
+    path: &std::path::Path,
+    offset: u64,
+    length: u64,
+    index: Arc<crate::endpoints::video::CencIndex>,
+    key: &[u8],
+) -> Result<Body, String> {
+    use futures::StreamExt;
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| format!("open {}: {e}", path.display()))?;
+    if offset > 0 {
+        file.seek(std::io::SeekFrom::Start(offset))
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    let limited = file.take(length);
+    let key = key.to_vec();
+    let mut pos = offset;
+    let stream = ReaderStream::with_capacity(limited, 64 * 1024).map(move |chunk| {
+        chunk.map(|bytes| {
+            let mut buf = bytes.to_vec();
+            // The key was validated when the response was built; a failure
+            // here can only come from a torn read, and passing the chunk
+            // through untransformed is no worse than the I/O error path.
+            let _ = crate::endpoints::video::apply_cenc_index(&mut buf, pos, &index, &key);
+            pos += buf.len() as u64;
+            axum::body::Bytes::from(buf)
+        })
+    });
+    Ok(Body::from_stream(stream))
 }
 
 #[cfg(test)]

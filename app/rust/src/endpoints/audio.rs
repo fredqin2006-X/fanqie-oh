@@ -13,14 +13,14 @@ use crate::endpoints::{Ctx, Params, Server};
 use crate::error::{ApiError, ApiResult};
 
 /// Go's url.Values.Set.
-fn set_param(params: &mut Vec<(String, String)>, key: &str, value: impl Into<String>) {
+pub(crate) fn set_param(params: &mut Vec<(String, String)>, key: &str, value: impl Into<String>) {
     let value = value.into();
     params.retain(|(k, _)| k != key);
     params.push((key.to_string(), value));
 }
 
 /// reading724Params from content_util.go.
-fn reading_724_params() -> Vec<(String, String)> {
+pub(crate) fn reading_724_params() -> Vec<(String, String)> {
     [
         ("iid", "{install_id}"),
         ("device_id", "{device_id}"),
@@ -285,12 +285,23 @@ fn handle_play<'a>(ctx: &'a Ctx, params: &'a Params) -> BoxFuture<'a, ApiResult<
         };
 
         let mut v = Value::Null;
+        // 这里用 Signed 模式，根本不经过设备池，所以重试无法换设备（旧注释
+        // 写成 pooled devices 是失实的）。保留重试只是为了上游偶发抖动。
         for _ in 0..AUDIO_PLAY_ATTEMPTS {
             let raw = Upstream::new(ctx.up.clone()).raw(&spec).await?;
             v = raw_json(&raw)?;
             if !audio_play_device_rejected(&v) {
                 break;
             }
+        }
+        // 桥接封套恒为 code:0 是既定设计（上游封套嵌在 video_info 里，消费方
+        // 在那里自查），所以这里不改成错误，只补一条痕迹：全部尝试都被拒绝时
+        // 此前没有任何一行日志说明原因。
+        if audio_play_device_rejected(&v) {
+            log::warn!(
+                "audio_play: every attempt was rejected at the body level (401/403/429); \
+                 no stream will be available"
+            );
         }
         patch_encrypted_audio_keys(&mut v);
         Ok(json!({
@@ -312,79 +323,18 @@ fn audio_play_device_rejected(v: &Value) -> bool {
     matches!(code as i64, 401 | 403 | 429)
 }
 
-/// Audio timeline: the speech-text request from audio_timeline.go.
-pub const AUDIO_SPEECH_TEXT_HOST: &str = "https://api-sinfonlinea.fanqiesdk.com";
-pub const AUDIO_SPEECH_TEXT_PATH: &str = "/api/novel/audio/speech/text/v1/";
-
-fn handle_timeline<'a>(ctx: &'a Ctx, params: &'a Params) -> BoxFuture<'a, ApiResult<Value>> {
-    Box::pin(async move {
-        let item_id = default_val(&params.get_str("item_id"), &params.get_str("item_ids"));
-        if item_id.is_empty() {
-            return Err(ApiError::BadRequest("缺少item_id参数".to_string()));
-        }
-        let genre = default_val(&params.get_str("genre"), "4");
-        let tone_id = default_val(&params.get_str("tone_id"), "99");
-
-        let mut p: Vec<(String, String)> = Vec::new();
-        set_param(&mut p, "item_id", item_id);
-        set_param(&mut p, "genre", genre);
-        set_param(&mut p, "tone_id", tone_id);
-        for (k, v) in [
-            ("device_platform", "android"),
-            ("os", "android"),
-            ("ssmix", "a"),
-            ("aid", "6589"),
-            ("app_name", "gold_browser"),
-            ("version_code", "150800"),
-            ("version_name", "15.8.0"),
-            ("manifest_version_code", "15800"),
-            ("update_version_code", "158004"),
-            ("ab_group", "94569,102754"),
-            ("ab_feature", "94563,102749"),
-            ("resolution", "1080*1920"),
-            ("dpi", "480"),
-            ("device_type", "FRD-AL10"),
-            ("device_brand", "honor"),
-            ("language", "zh"),
-            ("os_api", "28"),
-            ("os_version", "9"),
-            ("ac", "wifi"),
-            ("current_launch_mode", "enter_launch"),
-            ("pass_through", "update64"),
-            ("recommend_switch", "true"),
-            ("current_launch_mode_hot", "enter_launch"),
-            ("is_db", "0"),
-            ("today_first_launch_mode", "enter_launch"),
-            ("dq_param", "1"),
-            ("isTTWebViewHeifSupport", "0"),
-            ("plugin", "0"),
-            ("openlive_plugin_status", "0"),
-            ("client_vid", "13599182,15697199,13812938"),
-            ("rom_version", "28"),
-            ("iid", "{install_id}"),
-            ("device_id", "{device_id}"),
-        ] {
-            set_param(&mut p, k, v);
-        }
-
-        Upstream::new(ctx.up.clone())
-            .json(&UpstreamRequestSpec {
-                mode: UpstreamMode::DeviceSigned,
-                host: AUDIO_SPEECH_TEXT_HOST.to_string(),
-                path: AUDIO_SPEECH_TEXT_PATH.to_string(),
-                params: p,
-                headers: dragon_read_headers(),
-                ..Default::default()
-            })
-            .await
-    })
-}
-
 pub fn register(s: &mut Server) {
     s.add_route("audio_book_detail", handle_book_detail);
     s.add_route("audio_chapter_info", handle_chapter_info);
     s.add_route("audio_play", handle_play);
-    s.add_route("audio_timeline", handle_timeline);
+    s.add_route(
+        "audio_timeline",
+        crate::endpoints::audio_text::handle_timeline,
+    );
+    s.add_route(
+        "audio_timepoint",
+        crate::endpoints::audio_text::handle_timepoint,
+    );
 }
 
 #[cfg(test)]

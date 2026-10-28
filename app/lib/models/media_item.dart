@@ -38,6 +38,10 @@ class MediaItem {
   final String ep;
   final String kind; // 'book' | 'video' | 'manju' | 'manga' | 'audio'
 
+  /// Novel length (`word_number`) from the search card's `book_data`.
+  /// Zero when the card carries none, which is normal for non-novel kinds.
+  final int wordNumber;
+
   /// Upstream rating on a 0–10 scale; absent or invalid ratings stay unknown.
   final double? score;
 
@@ -63,6 +67,16 @@ class MediaItem {
   /// names. Empty when the card carries neither.
   final List<String> categories;
 
+  /// 排行行副标题：`secondary_info_list` 各条的 `content`（如
+  /// 「多人二刷」「9320万热度」），按 `line_idx` 分行后顺序拼接。官方排行块
+  /// 的行内 TagLayout（`b8w.xml` `f5p`）渲染的就是它们；空表不渲染该行。
+  final List<String> rankTags;
+
+  /// 书卡标签行（`book_data.recommend_reason_list`，服务端模板
+  /// `#tag_list_0`）：推荐理由 chips，文字与配色都来自服务端
+  /// （`rec_reason_style` 的番茄金是当前线上的统一样式）。
+  final List<MediaRecTag> recTags;
+
   /// 「作者声明：内容由AI生成」行（`video_detail.ai_usage_type > 0`，
   /// 官方播放页信息层按它渲染声明行）。
   final bool aiGenerated;
@@ -80,6 +94,7 @@ class MediaItem {
     required this.badge,
     required this.ep,
     required this.kind,
+    this.wordNumber = 0,
     this.score,
     this.tag,
     this.seriesId,
@@ -87,6 +102,8 @@ class MediaItem {
     this.intro = '',
     this.followerCount = 0,
     this.categories = const [],
+    this.rankTags = const [],
+    this.recTags = const [],
     this.episodeListText = '',
     this.aiGenerated = false,
   });
@@ -107,6 +124,7 @@ class MediaItem {
     String? badge,
     String? ep,
     String? kind,
+    int? wordNumber,
     double? score,
     MediaTag? tag,
     String? seriesId,
@@ -114,6 +132,8 @@ class MediaItem {
     String? intro,
     int? followerCount,
     List<String>? categories,
+    List<String>? rankTags,
+    List<MediaRecTag>? recTags,
     String? episodeListText,
     bool? aiGenerated,
   }) => MediaItem(
@@ -124,6 +144,7 @@ class MediaItem {
     badge: badge ?? this.badge,
     ep: ep ?? this.ep,
     kind: kind ?? this.kind,
+    wordNumber: wordNumber ?? this.wordNumber,
     score: score ?? this.score,
     tag: tag ?? this.tag,
     seriesId: seriesId ?? this.seriesId,
@@ -131,6 +152,8 @@ class MediaItem {
     intro: intro ?? this.intro,
     followerCount: followerCount ?? this.followerCount,
     categories: categories ?? this.categories,
+    rankTags: rankTags ?? this.rankTags,
+    recTags: recTags ?? this.recTags,
     episodeListText: episodeListText ?? this.episodeListText,
     aiGenerated: aiGenerated ?? this.aiGenerated,
   );
@@ -230,6 +253,12 @@ class MediaItem {
       item['secondary_infos'] ?? bd['secondary_infos'],
       fallback: item['category_schema'] ?? bd['category_schema'],
     );
+    final rankTags = parseRankTags(
+      bd['secondary_info_list'] ?? item['secondary_info_list'],
+    );
+    final recTags = parseRecTags(
+      bd['recommend_reason_list'] ?? item['recommend_reason_list'],
+    );
 
     return MediaItem(
       id:
@@ -238,6 +267,7 @@ class MediaItem {
           _firstString(item, idKeys) ??
           '',
       kind: kind,
+      wordNumber: _asInt(bd['word_number']) ?? _asInt(item['word_number']) ?? 0,
       score: _validScore(bd['score'] ?? item['score']),
       seriesId: seriesId,
       episodeId: episodeId,
@@ -303,11 +333,13 @@ class MediaItem {
           ]) ??
           '',
       intro:
-          _firstString(item, ['series_intro', 'intro']) ??
-          _firstString(bd, ['series_intro', 'intro']) ??
+          _firstString(item, ['series_intro', 'intro', 'abstract']) ??
+          _firstString(bd, ['series_intro', 'intro', 'abstract']) ??
           '',
       followerCount: followedCount,
       categories: categories,
+      rankTags: rankTags,
+      recTags: recTags,
       episodeListText: episodeListText,
       aiGenerated: aiUsageType > 0,
     );
@@ -1152,13 +1184,34 @@ List<MediaItem> parseMediaItems(Map<String, dynamic> payload, {String? kind}) {
   return out;
 }
 
+/// Picks the map/list that holds the chapter list.
+///
+/// Two shapes reach this function:
+///
+/// * The removed Web bridge nested the normalized list under `data.data`
+///   (`chapterListWithVolume`).
+/// * `/api/v1/books/<id>/directory` returns the upstream payload, where the
+///   chapter list sits **beside** `data.data` as `item_data_list` / `lists` /
+///   `item_list`.
+///
+/// Descending unconditionally broke the second shape: the inner `data` has no
+/// chapter list, so the directory came back empty and the reader reported a
+/// network error. Only descend when the inner map really is the directory.
 dynamic _directoryInner(Map<String, dynamic> payload) {
-  dynamic data = payload['data'] ?? payload;
-  if (data is Map && (data['data'] is Map || data['data'] is List)) {
-    data = data['data'];
-  }
+  final dynamic data = payload['data'] ?? payload;
+  if (data is! Map) return data;
+  final dynamic nested = data['data'];
+  if (nested is Map && _looksLikeDirectory(nested)) return nested;
+  if (nested is List) return nested;
   return data;
 }
+
+/// Whether [value] carries a chapter list this parser can consume.
+bool _looksLikeDirectory(dynamic value) =>
+    _findDirectoryEntries(value) != null ||
+    (value is Map &&
+        (value['chapterListWithVolume'] is List ||
+            value['chapterList'] is List));
 
 List<Map<String, dynamic>>? _chapterListFromVolume(dynamic volume) {
   if (volume is List) return _asMapList(volume);
@@ -1245,6 +1298,97 @@ bool _flag(Map<String, dynamic> m, List<String> keys) {
   return false;
 }
 
+/// 排行行副标题（`secondary_info_list`，`SecondaryInfo.java` 的 wire 格式）。
+///
+/// 官方按 `line_idx` 把条目分成两行（`ItemDataModel.setAllInfoList`），排行
+/// 块的行把每行渲染成一个 TagLayout（`o$g$a.b2`）。这里按行序摊平成一组
+/// `content`：行内顺序保持上游顺序，line 0 在前。
+List<String> parseRankTags(dynamic value) {
+  if (value is! List) return const [];
+  final byLine = <int, List<String>>{};
+  for (final entry in value) {
+    if (entry is! Map) continue;
+    final content = entry['content'];
+    if (content is! String || content.trim().isEmpty) continue;
+    final line = _asInt(entry['line_idx']) ?? 0;
+    (byLine[line] ??= []).add(content.trim());
+  }
+  if (byLine.isEmpty) return const [];
+  final lines = byLine.keys.toList()..sort();
+  return List.unmodifiable([for (final line in lines) ...byLine[line]!]);
+}
+
+/// One chip of the card's tag row (`recommend_reason_list` entries).
+///
+/// Wire colours are server-authored `#RRGGBBAA` strings (`rec_reason_style`);
+/// kept as strings so this model stays free of Flutter types — the widget
+/// converts via [recTagColor] at render time.
+class MediaRecTag {
+  const MediaRecTag({
+    required this.text,
+    this.textColor = '',
+    this.bgColor = '',
+    this.darkTextColor = '',
+    this.darkBgColor = '',
+  });
+
+  final String text;
+  final String textColor;
+  final String bgColor;
+  final String darkTextColor;
+  final String darkBgColor;
+
+  Map<String, dynamic> toJson() => {
+    'text': text,
+    if (textColor.isNotEmpty) 'textColor': textColor,
+    if (bgColor.isNotEmpty) 'bgColor': bgColor,
+    if (darkTextColor.isNotEmpty) 'darkTextColor': darkTextColor,
+    if (darkBgColor.isNotEmpty) 'darkBgColor': darkBgColor,
+  };
+
+  static List<MediaRecTag> fromJson(Map<String, dynamic> map) => [
+    if ((map['text'] ?? '').toString().trim().isNotEmpty)
+      MediaRecTag(
+        text: map['text'].toString(),
+        textColor: (map['textColor'] ?? '').toString(),
+        bgColor: (map['bgColor'] ?? '').toString(),
+        darkTextColor: (map['darkTextColor'] ?? '').toString(),
+        darkBgColor: (map['darkBgColor'] ?? '').toString(),
+      ),
+  ];
+}
+
+/// Parses the wire `recommend_reason_list`（服务端模板 `#tag_list_0` 的值源）。
+List<MediaRecTag> parseRecTags(dynamic value) {
+  if (value is! List) return const [];
+  final out = <MediaRecTag>[];
+  for (final entry in value) {
+    if (entry is! Map) continue;
+    final text = (entry['content'] ?? '').toString().trim();
+    if (text.isEmpty) continue;
+    final style = entry['rec_reason_style'];
+    final s = style is Map ? style : const <String, dynamic>{};
+    String pick(List<String> keys) {
+      for (final k in keys) {
+        final v = s[k]?.toString() ?? '';
+        if (v.isNotEmpty) return v;
+      }
+      return '';
+    }
+
+    out.add(
+      MediaRecTag(
+        text: text,
+        textColor: pick(['rec_style_text_color']),
+        bgColor: pick(['rec_style_background_color']),
+        darkTextColor: pick(['rec_style_dark_text_color']),
+        darkBgColor: pick(['rec_style_dark_background_color']),
+      ),
+    );
+  }
+  return List.unmodifiable(out);
+}
+
 /// Category names for the info panel's chip row. The feed card's
 /// `video_detail.secondary_infos` marks categories with `data_type == 3`
 /// (other entries are actors and the like); `category_schema` — a JSON string
@@ -1281,12 +1425,16 @@ extension MediaItemJson on MediaItem {
     'badge': badge,
     'ep': ep,
     'kind': kind,
+    if (wordNumber > 0) 'wordNumber': wordNumber,
     if (score != null) 'score': score,
     if (seriesId != null) 'seriesId': seriesId,
     if (episodeId != null) 'episodeId': episodeId,
     if (intro.isNotEmpty) 'intro': intro,
     if (followerCount > 0) 'followerCount': followerCount,
     if (categories.isNotEmpty) 'categories': categories,
+    if (rankTags.isNotEmpty) 'rankTags': rankTags,
+    if (recTags.isNotEmpty)
+      'recTags': [for (final t in recTags) t.toJson()],
     if (episodeListText.isNotEmpty) 'episodeListText': episodeListText,
     if (aiGenerated) 'aiGenerated': true,
     // The promotional badge must survive a round-trip; the keys reuse
@@ -1314,6 +1462,7 @@ extension MediaItemJson on MediaItem {
       badge: field('badge'),
       ep: field('ep'),
       kind: kind,
+      wordNumber: _asInt(map['wordNumber']) ?? 0,
       score: MediaItem._validScore(map['score']),
       tag: MediaTag.fromRaw(
         map['tag'] is Map ? (map['tag'] as Map).cast<String, dynamic>() : null,
@@ -1325,6 +1474,14 @@ extension MediaItemJson on MediaItem {
       categories: map['categories'] is List
           ? List.unmodifiable((map['categories'] as List).map((e) => '$e'))
           : const [],
+      rankTags: map['rankTags'] is List
+          ? List.unmodifiable((map['rankTags'] as List).map((e) => '$e'))
+          : const [],
+      recTags: [
+        if (map['recTags'] is List)
+          for (final e in map['recTags'] as List)
+            if (e is Map) ...MediaRecTag.fromJson(Map<String, dynamic>.from(e)),
+      ],
       episodeListText: field('episodeListText'),
       aiGenerated: map['aiGenerated'] == true,
     );

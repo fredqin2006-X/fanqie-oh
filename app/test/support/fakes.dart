@@ -108,6 +108,9 @@ class MemoryChapterCache implements ChapterCache {
       content[bookId]?.keys.toSet() ?? {};
 
   @override
+  Future<CachedBook?> savedCatalogue(String bookId) async => catalogs[bookId];
+
+  @override
   Future<CachedBook?> cachedBook(String bookId) async {
     final chapters = content[bookId];
     if (chapters == null || chapters.isEmpty) return null;
@@ -131,6 +134,9 @@ class MemoryDramaDownloadStore implements DramaDownloadStore {
   final Directory? videoDirectory;
   final Map<String, CachedEpisode> _episodes = {};
   final Map<String, CachedDrama> _dramas = {};
+
+  @override
+  bool get isReady => true;
 
   @override
   final ValueNotifier<int> changes = ValueNotifier(0);
@@ -241,6 +247,7 @@ class FakeNativePlayer extends NativePlayer {
   bool isBuffering = false;
   bool disposed = false;
   double rate = 1;
+  @override
   double volume = 1;
   final positions = StreamController<Duration>.broadcast(sync: true);
   final durations = StreamController<Duration>.broadcast(sync: true);

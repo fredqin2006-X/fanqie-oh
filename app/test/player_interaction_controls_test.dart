@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -12,6 +14,7 @@ import 'support/fakes.dart';
 
 void main() {
   late List<MethodCall> nativeCalls;
+  late List<MethodCall> displayCalls;
 
   setUp(() {
     SharedPreferences.setMockInitialValues({'player_playback_rate': 1.5});
@@ -22,6 +25,18 @@ void main() {
       morePanelStyle: 1,
     );
     nativeCalls = [];
+    displayCalls = [];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(const MethodChannel('fqapp/display'), (
+          call,
+        ) async {
+          displayCalls.add(call);
+          return switch (call.method) {
+            'beginPlayerBrightness' => .5,
+            'setPlayerBrightness' => true,
+            _ => null,
+          };
+        });
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(const MethodChannel('fqapp/native_player'), (
           call,
@@ -33,6 +48,8 @@ void main() {
 
   tearDown(() {
     PlayerStyleConfig.instance = PlayerStyleConfig.defaults;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(const MethodChannel('fqapp/display'), null);
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(
           const MethodChannel('fqapp/native_player'),
@@ -89,9 +106,9 @@ void main() {
 
     await tester.tap(find.byKey(const ValueKey('player-rate-text')));
     await tester.pumpAndSettle();
-    expect(find.byKey(const ValueKey('player-more-rate-row')), findsOneWidget);
+    expect(find.byKey(const ValueKey('player-rate-sheet')), findsOneWidget);
     expect(find.byKey(const ValueKey('player-clear-screen')), findsNothing);
-    await tester.tap(find.byKey(const ValueKey('player-more-rate-1.25')));
+    await tester.tap(find.byKey(const ValueKey('player-rate-sheet-2')));
     await tester.pumpAndSettle();
     expect(player.rate, 1.25);
     expect(find.text('1.25x'), findsOneWidget);
@@ -130,7 +147,9 @@ void main() {
     expect(find.text('第2集'), findsOneWidget);
   });
 
-  testWidgets('fullscreen stays free of chrome after rotation and pause', (tester) async {
+  testWidgets('fullscreen reveals controls and center double tap pauses', (
+    tester,
+  ) async {
     final player = FakeNativePlayer()..isPlaying = true;
     await _mount(tester, player, shortSeries: true);
     await tester.tap(find.byKey(const ValueKey('player-fullscreen-pill')));
@@ -139,19 +158,23 @@ void main() {
     await tester.pump();
     expect(find.byKey(const ValueKey('player-clear-screen')), findsNothing);
     expect(find.text('恢复'), findsNothing);
-    await tester.tapAt(const Offset(400, 200));
-    await tester.pump(const Duration(milliseconds: 350));
-    expect(player.isPlaying, isFalse);
-    expect(find.byKey(const ValueKey('landscape-play')), findsNothing);
+    await tester.pump(const Duration(seconds: 4));
     await tester.tapAt(const Offset(400, 200));
     await tester.pump(const Duration(milliseconds: 350));
     expect(player.isPlaying, isTrue);
+    expect(find.byKey(const ValueKey('landscape-play')), findsOneWidget);
+    await _doubleTap(tester, const Offset(400, 200));
+    expect(player.isPlaying, isFalse);
+    await _doubleTap(tester, const Offset(400, 200));
+    expect(player.isPlaying, isTrue);
     await tester.binding.setSurfaceSize(const Size(400, 800));
     await tester.pump();
-    expect(find.byKey(const ValueKey('player-fullscreen-pill')), findsNothing);
     await tester.binding.handlePopRoute();
     await tester.pump();
-    expect(find.byKey(const ValueKey('player-fullscreen-pill')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('player-fullscreen-pill')),
+      findsOneWidget,
+    );
     expect(tester.takeException(), isNull);
   });
 
@@ -203,7 +226,7 @@ void main() {
   });
 
   testWidgets(
-    'landscape vertical swipes leave device settings, episode and playback untouched',
+    'landscape vertical swipes adjust brightness and volume without paging',
     (tester) async {
       final player = FakeNativePlayer()..isPlaying = true;
       final selected = <int>[];
@@ -213,22 +236,363 @@ void main() {
       await _slide(tester, const Offset(200, 200), const Offset(0, -50));
       await _slide(tester, const Offset(600, 200), const Offset(0, 60));
       expect(nativeCalls, isEmpty);
-      expect(find.textContaining('亮度'), findsNothing);
-      expect(find.textContaining('音量'), findsNothing);
+      expect(
+        displayCalls.map((call) => call.method),
+        containsAllInOrder(['beginPlayerBrightness', 'setPlayerBrightness']),
+      );
+      expect(player.volume, lessThan(1));
+      expect(find.textContaining('音量'), findsOneWidget);
       expect(
         tester.element(find.byKey(const ValueKey('video-frame'))),
         same(video),
       );
-      expect(player.calls, isEmpty);
+      expect(player.calls.every((call) => call.startsWith('volume:')), isTrue);
       expect(player.isPlaying, isTrue);
       expect(selected, isEmpty);
     },
   );
 
-  testWidgets('fullscreen hides text controls even with large fonts', (tester) async {
-    await _mount(tester, FakeNativePlayer()..isPlaying = true,
-      landscape: true, textScale: 2.5);
+  testWidgets('landscape double taps seek at sides and pause at center', (
+    tester,
+  ) async {
+    final player = FakeNativePlayer()..isPlaying = true;
+    player.currentPosition = const Duration(seconds: 30);
+    await _mount(tester, player, landscape: true);
+    player.calls.clear();
+    Future<void> doubleTap(Offset point) async {
+      await tester.tapAt(point);
+      await tester.pump(const Duration(milliseconds: 80));
+      await tester.tapAt(point);
+      await tester.pump(const Duration(milliseconds: 350));
+    }
+
+    await doubleTap(const Offset(100, 200));
+    expect(player.calls, contains('seek:20'));
+    await doubleTap(const Offset(700, 200));
+    expect(player.calls, contains('seek:30'));
+    await doubleTap(const Offset(400, 200));
+    expect(player.calls, contains('pause'));
+  });
+
+  testWidgets('landscape hold restores saved speed after release and cancel', (
+    tester,
+  ) async {
+    final player = FakeNativePlayer()..isPlaying = true;
+    await _mount(tester, player, landscape: true);
+    final hold = await tester.startGesture(const Offset(400, 200));
+    await tester.pump(const Duration(milliseconds: 600));
+    expect(player.rate, 2);
+    await hold.up();
+    await tester.pump();
+    expect(player.rate, 1.5);
+    final cancelled = await tester.startGesture(const Offset(400, 200));
+    await tester.pump(const Duration(milliseconds: 600));
+    expect(player.rate, 2);
+    await cancelled.cancel();
+    await tester.pump();
+    expect(player.rate, 1.5);
+  });
+
+  testWidgets(
+    'landscape seek previews until release and cancel does not seek',
+    (tester) async {
+      final player = FakeNativePlayer()..isPlaying = true;
+      await _mount(tester, player, landscape: true);
+      player.calls.clear();
+      final drag = await tester.startGesture(const Offset(200, 200));
+      await drag.moveBy(const Offset(160, 0));
+      await tester.pump();
+      expect(player.calls.where((call) => call.startsWith('seek:')), isEmpty);
+      expect(
+        find.byKey(const ValueKey('player-gesture-feedback')),
+        findsOneWidget,
+      );
+      await drag.up();
+      await tester.pump();
+      expect(
+        player.calls.where((call) => call.startsWith('seek:')),
+        hasLength(1),
+      );
+      player.calls.clear();
+      final cancelled = await tester.startGesture(const Offset(200, 200));
+      await cancelled.moveBy(const Offset(160, 0));
+      await tester.pump();
+      await cancelled.cancel();
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(player.calls.where((call) => call.startsWith('seek:')), isEmpty);
+    },
+  );
+
+  testWidgets('short-series landscape double taps clamp to the timeline', (
+    tester,
+  ) async {
+    final player = FakeNativePlayer()..isPlaying = true;
+    player.currentPosition = const Duration(seconds: 5);
+    await _mount(tester, player, landscape: true, shortSeries: true);
+    await _doubleTap(tester, const Offset(100, 200));
+    expect(player.position, Duration.zero);
+    player.currentPosition = const Duration(seconds: 118);
+    player.positions.add(player.currentPosition);
+    await _doubleTap(tester, const Offset(700, 200));
+    expect(player.position, player.duration);
+    expect(player.isPlaying, isTrue);
+  });
+
+  testWidgets('pending seek cannot clear a newer relative preview', (
+    tester,
+  ) async {
+    final player = _DelayedSeekPlayer()..isPlaying = true;
+    await _mount(tester, player, landscape: true);
+    final first = await tester.startGesture(const Offset(200, 200));
+    await first.moveBy(const Offset(160, 0));
+    await tester.pump();
+    await first.up();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(player.targets, [const Duration(seconds: 44)]);
+
+    final second = await tester.startGesture(const Offset(200, 200));
+    await second.moveBy(const Offset(160, 0));
+    await tester.pump();
+    player.gates.first.complete();
+    await tester.pump();
+    expect(find.text('01:08 / 02:00'), findsOneWidget);
+    await second.up();
+    await tester.pump();
+    expect(player.targets.last, const Duration(seconds: 68));
+    player.gates.last.complete();
+    await tester.pump(const Duration(milliseconds: 350));
+  });
+
+  testWidgets('double tap continues from a pending drag target', (
+    tester,
+  ) async {
+    final player = _DelayedSeekPlayer()..isPlaying = true;
+    await _mount(tester, player, landscape: true);
+    final drag = await tester.startGesture(const Offset(200, 200));
+    await drag.moveBy(const Offset(160, 0));
+    await tester.pump();
+    await drag.up();
+    await tester.pump(const Duration(milliseconds: 100));
+    await _doubleTap(tester, const Offset(700, 200));
+    expect(player.targets, [
+      const Duration(seconds: 44),
+      const Duration(seconds: 54),
+    ]);
+    player.gates.first.complete();
+    await tester.pump();
+    expect(find.textContaining('快进 10秒'), findsOneWidget);
+    player.gates.last.complete();
+    await tester.pump(const Duration(milliseconds: 350));
+  });
+
+  for (final cancel in [false, true]) {
+    testWidgets('late brightness start is released (cancel=$cancel)', (
+      tester,
+    ) async {
+      final pending = Completer<double>();
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        const MethodChannel('fqapp/display'),
+        (call) async {
+          displayCalls.add(call);
+          if (call.method == 'beginPlayerBrightness') return pending.future;
+          return call.method == 'setPlayerBrightness' ? true : null;
+        },
+      );
+      final player = FakeNativePlayer()..isPlaying = true;
+      await _mount(tester, player, landscape: true);
+      final drag = await tester.startGesture(const Offset(200, 200));
+      await drag.moveBy(const Offset(0, -60));
+      await tester.pump();
+      if (cancel) {
+        await drag.cancel();
+      } else {
+        await drag.up();
+      }
+      await tester.pump();
+      pending.complete(.5);
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(displayCalls.map((call) => call.method), [
+        'beginPlayerBrightness',
+        'endPlayerBrightness',
+      ]);
+      expect(
+        find.byKey(const ValueKey('player-gesture-feedback')),
+        findsNothing,
+      );
+    });
+  }
+
+  for (final leave in ['portrait', 'inactive', 'exit']) {
+    testWidgets('brightness and boost restore on $leave', (tester) async {
+      final player = FakeNativePlayer()..isPlaying = true;
+      await _mount(tester, player, landscape: true);
+      await _slide(tester, const Offset(200, 200), const Offset(0, -60));
+      expect(
+        displayCalls.map((call) => call.method),
+        contains('setPlayerBrightness'),
+      );
+      final hold = await tester.startGesture(const Offset(400, 200));
+      await tester.pump(const Duration(milliseconds: 600));
+      expect(player.rate, 2);
+      if (leave == 'portrait') {
+        await tester.binding.setSurfaceSize(const Size(400, 800));
+      } else if (leave == 'inactive') {
+        tester.binding.handleAppLifecycleStateChanged(
+          AppLifecycleState.inactive,
+        );
+      } else {
+        await tester.binding.handlePopRoute();
+      }
+      await tester.pump();
+      expect(player.rate, 1.5);
+      expect(displayCalls.last.method, 'endPlayerBrightness');
+      await hold.cancel();
+      await tester.pump(const Duration(milliseconds: 350));
+    });
+  }
+
+  testWidgets('volume drag clamps and a paused video remains paused', (
+    tester,
+  ) async {
+    final player = FakeNativePlayer()..volume = .5;
+    await _mount(tester, player, landscape: true);
+    await _slide(tester, const Offset(600, 200), const Offset(0, 600));
+    expect(player.volume, 0);
+    await _slide(tester, const Offset(600, 200), const Offset(0, -600));
+    expect(player.volume, 1);
+    expect(player.isPlaying, isFalse);
+    expect(displayCalls, isEmpty);
+  });
+
+  testWidgets('adjusted brightness survives taps seeks and holds until exit', (
+    tester,
+  ) async {
+    var brightness = .5;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      const MethodChannel('fqapp/display'),
+      (call) async {
+        displayCalls.add(call);
+        if (call.method == 'beginPlayerBrightness') return brightness;
+        if (call.method == 'setPlayerBrightness') {
+          brightness = (call.arguments as Map)['brightness'] as double;
+          return true;
+        }
+        if (call.method == 'endPlayerBrightness') brightness = .5;
+        return null;
+      },
+    );
+    final player = FakeNativePlayer()..isPlaying = true;
+    await _mount(tester, player, landscape: true);
+    await _slide(tester, const Offset(200, 200), const Offset(0, -60));
+    final adjusted = brightness;
+    expect(adjusted, greaterThan(.5));
+
+    await tester.tapAt(const Offset(400, 200));
+    await tester.pump(const Duration(milliseconds: 350));
+    expect(player.isPlaying, isTrue);
+    expect(brightness, adjusted);
+    await tester.tapAt(const Offset(400, 200));
+    await tester.pump(const Duration(milliseconds: 350));
+    expect(player.isPlaying, isTrue);
+    final drag = await tester.startGesture(const Offset(200, 200));
+    await drag.moveBy(const Offset(160, 0));
+    await tester.pump();
+    await drag.up();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(brightness, adjusted);
+    final hold = await tester.startGesture(const Offset(400, 200));
+    await tester.pump(const Duration(milliseconds: 600));
+    expect(player.rate, 2);
+    expect(brightness, adjusted);
+    await hold.cancel();
+    await tester.pump(const Duration(milliseconds: 350));
+    expect(brightness, adjusted);
+    expect(
+      displayCalls.where((call) => call.method == 'endPlayerBrightness'),
+      isEmpty,
+    );
+
+    await tester.binding.handlePopRoute();
+    await tester.pump();
+    expect(brightness, .5);
+    expect(
+      displayCalls.where((call) => call.method == 'endPlayerBrightness'),
+      hasLength(1),
+    );
+  });
+
+  testWidgets('cancelling an active brightness drag restores its lease once', (
+    tester,
+  ) async {
+    final player = FakeNativePlayer()..isPlaying = true;
+    await _mount(tester, player, landscape: true);
+    final drag = await tester.startGesture(const Offset(200, 200));
+    await drag.moveBy(const Offset(0, -60));
+    await tester.pump();
+    expect(
+      displayCalls.map((call) => call.method),
+      contains('setPlayerBrightness'),
+    );
+    await drag.cancel();
+    await tester.pump(const Duration(milliseconds: 350));
+    expect(
+      displayCalls.where((call) => call.method == 'endPlayerBrightness'),
+      hasLength(1),
+    );
+  });
+
+  testWidgets('gesture HUD fits a small landscape with large text', (
+    tester,
+  ) async {
+    await _mount(
+      tester,
+      FakeNativePlayer()..isPlaying = true,
+      landscape: true,
+      textScale: 2.5,
+    );
+    await tester.binding.setSurfaceSize(const Size(480, 280));
+    await tester.pump();
+    final drag = await tester.startGesture(const Offset(100, 140));
+    await drag.moveBy(const Offset(160, 0));
+    await tester.pump();
+    final feedback = find.byKey(const ValueKey('player-gesture-feedback'));
+    expect(feedback, findsOneWidget);
+    final rect = tester.getRect(feedback);
+    expect(rect.left, greaterThanOrEqualTo(0));
+    expect(rect.right, lessThanOrEqualTo(480));
+    expect(rect.top, greaterThanOrEqualTo(0));
+    expect(rect.bottom, lessThanOrEqualTo(280));
     expect(tester.takeException(), isNull);
+    await drag.cancel();
+    await tester.pump(const Duration(milliseconds: 350));
+    final brightness = await tester.startGesture(const Offset(100, 140));
+    await brightness.moveBy(const Offset(0, -35));
+    await tester.pump();
+    await brightness.moveBy(const Offset(0, -30));
+    await tester.pump();
+    expect(find.byKey(const ValueKey('player-gesture-label')), findsOneWidget);
+    final hud = tester.getRect(
+      find.byKey(const ValueKey('player-gesture-hud')),
+    );
+    expect(hud.left, greaterThanOrEqualTo(0));
+    expect(hud.right, lessThanOrEqualTo(480));
+    expect(tester.takeException(), isNull);
+    await brightness.up();
+    await tester.pump(const Duration(milliseconds: 350));
+  });
+
+  testWidgets('fullscreen controls fit and auto-hide even with large fonts', (
+    tester,
+  ) async {
+    await _mount(
+      tester,
+      FakeNativePlayer()..isPlaying = true,
+      landscape: true,
+      textScale: 2.5,
+    );
+    expect(tester.takeException(), isNull);
+    expect(find.byTooltip('更多'), findsOneWidget);
+    await tester.pump(const Duration(seconds: 4));
     expect(find.byTooltip('更多'), findsNothing);
     expect(find.byKey(const ValueKey('landscape-seek')), findsNothing);
     expect(find.text('恢复'), findsNothing);
@@ -258,6 +622,13 @@ Future<void> _slide(WidgetTester tester, Offset start, Offset delta) async {
   await gesture.moveBy(delta);
   await tester.pump();
   await gesture.up();
+  await tester.pump(const Duration(milliseconds: 350));
+}
+
+Future<void> _doubleTap(WidgetTester tester, Offset point) async {
+  await tester.tapAt(point);
+  await tester.pump(const Duration(milliseconds: 80));
+  await tester.tapAt(point);
   await tester.pump(const Duration(milliseconds: 350));
 }
 
@@ -291,7 +662,14 @@ Future<void> _mount(
   );
   await tester.pumpAndSettle();
   if (landscape) {
-    await tester.tap(find.byTooltip('全屏'));
+    if (shortSeries) {
+      await tester.binding.setSurfaceSize(const Size(400, 800));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('player-fullscreen-pill')));
+      await tester.binding.setSurfaceSize(const Size(800, 450));
+    } else {
+      await tester.tap(find.byTooltip('全屏'));
+    }
     await tester.pumpAndSettle();
   }
 }
@@ -333,3 +711,17 @@ Widget _app(
     ),
   ),
 );
+
+class _DelayedSeekPlayer extends FakeNativePlayer {
+  final targets = <Duration>[];
+  final gates = <Completer<void>>[];
+
+  @override
+  Future<void> seek(Duration position) async {
+    targets.add(position);
+    final gate = Completer<void>();
+    gates.add(gate);
+    await gate.future;
+    await super.seek(position);
+  }
+}

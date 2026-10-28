@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../models/media_item.dart';
 import '../services/api_client.dart';
+import '../services/app_theme.dart';
 import '../services/audio_preferences.dart';
 import '../services/episode_source_cache.dart';
 import '../services/native_player.dart';
@@ -149,31 +150,45 @@ class _ListenModePageState extends State<ListenModePage>
             );
       final url = variant?.url ?? source.url;
       final keyHex = variant?.keyHex ?? source.keyHex;
-      await _player?.dispose();
-      final player = (widget.playerFactory ?? NativePlayer.new)();
-      player.audioOnly = true;
-      await player.create(url, keyHex);
-      await player.setRate(_rate);
-      if (autoplay) unawaited(player.play());
-      _completedSub?.cancel();
-      _completedSub = player.completedStream.listen((completed) {
-        if (completed) _onEpisodeEnded();
-      });
-      _positionSub?.cancel();
-      _positionSub = player.positionStream.listen((_) {
-        if (mounted && !_switching) setState(() {});
-      });
-      if (!mounted) {
-        await player.dispose();
-        return;
+      // 旧播放器释放后立即把字段置空：否则下面任何一步抛异常都会让 `_player`
+      // 继续指向已释放的句柄，播放按钮可点却静默无响应。
+      final previous = _player;
+      _player = null;
+      await previous?.dispose();
+      NativePlayer? created;
+      try {
+        final player =
+            (widget.playerFactory ?? () => NativePlayer(audioOnly: true))();
+        created = player;
+        await player.create(url, keyHex);
+        await player.setRate(_rate);
+        if (autoplay) unawaited(player.play());
+        _completedSub?.cancel();
+        _completedSub = player.completedStream.listen((completed) {
+          if (completed) _onEpisodeEnded();
+        });
+        _positionSub?.cancel();
+        _positionSub = player.positionStream.listen((_) {
+          if (mounted && !_switching) setState(() {});
+        });
+        if (!mounted) return;
+        setState(() {
+          _player = player;
+          _index = index;
+        });
+        // 所有权已交给 `_player`，不能在这里释放。
+        created = null;
+        unawaited(_startForeground());
+      } finally {
+        // 创建/初始化失败，或页面已卸载：新建的播放器不能泄漏。
+        await created?.dispose();
       }
-      setState(() {
-        _player = player;
-        _index = index;
-      });
-      unawaited(_startForeground());
     } catch (_) {
-      messenger?.showSnackBar(const SnackBar(content: Text('本集暂时无法收听')));
+      // `messenger` 要等首个 await 之后才能取（见上），而这里正是那条 await
+      // 抛出的路径——不补取一次，取流失败会被静默吞掉，界面毫无提示。
+      final state =
+          messenger ?? (mounted ? ScaffoldMessenger.maybeOf(context) : null);
+      state?.showSnackBar(const SnackBar(content: Text('本集暂时无法收听')));
     } finally {
       _switching = false;
     }
@@ -212,6 +227,8 @@ class _ListenModePageState extends State<ListenModePage>
     return NativePlayer.startListenForeground(
       title: widget.seriesTitle,
       episode: _episodeTitle(_index),
+      // 通知左上角与系统媒体卡片显示的就是这张封面（对齐官方）。
+      coverUrl: widget.coverUrl,
       playing: player?.playWhenReady ?? true,
       hasPrev: _index > 0,
       hasNext: _index < widget.episodes.length - 1,
@@ -254,7 +271,11 @@ class _ListenModePageState extends State<ListenModePage>
       },
       child: Scaffold(
       key: const ValueKey('listen-page'),
-      backgroundColor: const Color(0xFF121212),
+      // 全屏听书页是整块大底色：OLED 纯黑生效时降到 #000000 省电，
+      // 其余深色模式保持官方 #121212。AppBar / 按钮本来就是透明 + 白字。
+      backgroundColor: oledActive()
+          ? Colors.black
+          : const Color(0xFF121212),
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         foregroundColor: Colors.white,
@@ -277,13 +298,19 @@ class _ListenModePageState extends State<ListenModePage>
               child: Center(
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(16),
-                  child: Image.network(
-                    ApiClient.instance.absoluteUrl(widget.coverUrl),
-                    key: const ValueKey('listen-cover'),
+                  // 系列海报全应用都是竖版：信息流卡与官方详情页封面
+                  // 都是 5/7。这里给出明确框，而不是只给宽度——只给宽度时
+                  // 高度由图片自身撑，受限时 BoxFit.cover 会裁掉海报；失败
+                  // 占位也从正方形改成同一比例（issue #85）。
+                  child: SizedBox(
                     width: 220,
-                    fit: BoxFit.cover,
-                    errorBuilder: (_, _, _) =>
-                        const SizedBox(width: 220, height: 220),
+                    height: 308,
+                    child: Image.network(
+                      ApiClient.instance.absoluteUrl(widget.coverUrl),
+                      key: const ValueKey('listen-cover'),
+                      fit: BoxFit.cover,
+                      errorBuilder: (_, _, _) => const SizedBox.expand(),
+                    ),
                   ),
                 ),
               ),
