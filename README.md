@@ -4,9 +4,9 @@
 
 - 最低系统：**HarmonyOS 6.1.0（API 23）**，支持 6.1 及以上版本。
 - 发布目标：ARM64 手机；Flutter-OH + ArkTS + Rust/C。
-- 当前版本：**1.2.0（127）**。内部构建号从测试版继续递增。
+- 当前版本：**1.2.1（128）**。内部构建号从测试版继续递增。
 - 源码与反馈：[fredqin2006-X/fanqie-oh](https://github.com/fredqin2006-X/fanqie-oh)。
-- 下载：[v1.2.0 Release](https://github.com/fredqin2006-X/fanqie-oh/releases/tag/v1.2.0)。
+- 下载：[v1.2.1 Release](https://github.com/fredqin2006-X/fanqie-oh/releases/tag/v1.2.1)。
 
 ## 功能
 
@@ -48,11 +48,9 @@ Pop-Location
 
 ## 验证与维护
 
-2026-11-08 的未发布源码已同步安卓 `1.0.201+206`，包含 Issue #1 听书自动翻页/同步修正、书架分组、书旗书源、新主题及 AI 阅读。鸿蒙显示版本仍为 1.2.0（127）；范围见 [同步记录](docs/upstream/2026-11-08-android-followup.md)，测试、构建和待真机项目见 [本轮验证](docs/acceptance/2026-11-08-upstream-port.md)。下载区的 v1.2.0 仍是 2026-10-28 的公开版本。
+2026-11-08 的源码已同步安卓 `1.0.201+206`，修复 Issue #1 听书自动翻页/同步，并同步书架分组、书旗书源、新主题及 AI 阅读。用户确认本轮真机验收完成；设备型号、系统版本和逐项结果未提供。实现范围及验收边界见 [同步记录](docs/upstream/2026-11-08-android-followup.md) 和 [本轮验证](docs/acceptance/2026-11-08-upstream-port.md)。
 
-用户于 2026-10-28 反馈本轮更新“测试通过”，并授权提交源码、发布 1.2.0。此反馈针对升级版本号前的功能验证包；1.2.0（127）另行构建并校验。没有记录本轮测试的设备型号、系统版本和逐项结果，用户反馈、主机自动化测试与发布包构建分别记录。
-
-- [v1.2.0 发布说明与验证范围](docs/releases/v1.2.0.md)、[v1.0.0 历史发布](docs/releases/v1.0.0.md)
+- [v1.2.1 发布说明与验证范围](docs/releases/v1.2.1.md)、[v1.2.0 发布说明](docs/releases/v1.2.0.md)、[v1.0.0 历史发布](docs/releases/v1.0.0.md)
 - [变更日志](CHANGELOG.md)、[交付历史](docs/delivery.md)
 - [模拟器横屏与安全区验证](docs/acceptance/2026-10-17-emulator-rotation.md)
 - [移植执行手册](鸿蒙移植执行手册.md)、[上游改动记录](docs/upstream-changes.md)
