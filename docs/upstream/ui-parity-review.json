@@ -13,7 +13,7 @@
       "path": "lib/pages/about_page.dart",
       "reason": "Harmony brand, version, source and feedback links; upstream support attribution",
       "upstreamHash": "22376dc8bd687ca31961555a4cbf5daf6db0e4361bfbe39cf38e3d36c9f74320",
-      "harmonyHash": "40788ebec30072eb00d93c7128ada5662014054821b29b90759a240c1207dd7a"
+      "harmonyHash": "d4288e96fb78090c77d7bdecaabfb4fe7e2683a3dd7d55a642df9bc44bf85fac"
     },
     {
       "path": "lib/pages/drama_page.dart",
