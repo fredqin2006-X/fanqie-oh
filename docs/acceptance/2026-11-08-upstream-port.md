@@ -11,11 +11,11 @@
 - C 原生测试：74 项通过，包含 AES/CENC、时伸缩、重采样、畸形输入和真实 FFmpeg 音视频帧比较。
 - Rust 主机测试：263 项通过；2 项真实上游网络 smoke test 明确忽略，3 项符号链接相关用例因当前 Windows 进程无创建符号链接权限而过滤。
 - Flutter Rust Bridge：9 项真实 Dart → FRB → Rust 动态库集成通过，使用本地 mock 上游，无真实设备池或外网。
-- UI 源码复核：314 份入口/页面/组件中 304 份一致，126 份资源中 124 份一致；其余为已记录的适配差异。
+- UI 源码复核：314 份入口/页面/组件中 304 份一致，126 份资源中 123 份一致；13 处差异均已记录并锁定摘要。
 - ARM64 OHOS Rust release 原生核心已构建，源摘要为 `b55a4eea230883955c71c666e33b85c2e8ed57b2edf97f0f93f27a15e1c539ec`。
-- ARM64 Release HAP 构建成功。包内检查版本 `1.2.0 (127)`、`debug=false`、HarmonyOS 6.1/API 23 min/target、SDK 26、ARM64 ELF 和唯 ARM64 Rust ABI；打包 Rust 核心与新构建剥离产物匹配。未签名、未安装、未推送、未发布。
-- 本地交付包：`local-reports/delivery/FanqieOH-20261108-android-sync-arm64-unsigned.hap`，110651272 bytes，SHA-256 `b1bbf18df0e34deb5ee08e53968466ca9730ea0481fb745fe86c2e0e8bde9c67`。
-- 构建输入和结果见 [`docs/builds/20261108T070333131Z-9cf1fe-release-ohos-arm64.md`](../builds/20261108T070333131Z-9cf1fe-release-ohos-arm64.md)；APK/HAP 二进制、原始测试日志和设备材料均不纳入 Git。
+- 最终 ARM64 Release HAP 由提交 `94912824` 的源码输入重建。包内检查版本 `1.2.0 (127)`、`debug=false`、HarmonyOS 6.1/API 23 min/target、SDK 26、ARM64 ELF 和唯 ARM64 Rust ABI；打包 Rust 核心与新构建剥离产物匹配。未签名、未安装、未推送、未发布。
+- 本地交付包：`local-reports/delivery/FanqieOH-20261108-android-sync-arm64-unsigned.hap`，110651271 bytes，SHA-256 `8bfa8028a8a9fca524241ae205297aa6e797f8a2d4efc3fdb9cae82958085929`。
+- 构建输入和结果见 [最终 HAP 构建记录](../builds/20261108T072022549Z-83f716-release-ohos-arm64.md)；HAP 二进制、原始测试日志和设备材料均不纳入 Git。
 
 首次全量回归出现 18 个失败。修复本地书分组清理、后台 PiP 交接后，更新了新版横屏/设置导航断言。最终全量结果包含 9 项真实 FRB 集成，为上述 3534 通过、4 跳过。
 

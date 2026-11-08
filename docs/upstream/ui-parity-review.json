@@ -70,6 +70,12 @@
       "harmonyHash": "6ecacabcbfa43216d99a98e992a37e8407f426b0397b27f51aa8fd457634ea7b"
     },
     {
+      "path": "assets/fonts/RobotoMono-OFL.txt",
+      "reason": "Remove trailing whitespace from the upstream OFL notice without changing its license terms",
+      "upstreamHash": "3133f95ab6f36a2b1587a47010f003dccd6021e16538f6050926706047af95c8",
+      "harmonyHash": "46cb808f993d4978cfa33d963688a0b52a6d8e98751af9cace046a19834c90eb"
+    },
+    {
       "path": "assets/images/app_logo.webp",
       "reason": "Retain published Harmony app logo",
       "upstreamHash": "b8d6ed5a0521c5db8313c5096113d6264ab3b0f2d4383f4a16cfb619826e0ede",
