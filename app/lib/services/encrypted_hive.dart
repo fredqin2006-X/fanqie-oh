@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:hive_ce/hive.dart';
 import 'package:flutter/foundation.dart';
 
+import 'app_log.dart';
 import 'secure_key_provider.dart';
 
 /// Opens every Hive box encrypted (hive_ce, AES-256 `HiveAesCipher`).
@@ -15,8 +16,9 @@ import 'secure_key_provider.dart';
 /// next launch retries instead of losing records.
 ///
 /// Key loss: when secure storage returns a key that cannot open an existing
-/// encrypted box (Keystore wiped, entry replaced), the unreadable box is
-/// deleted and recreated empty — treated as empty, never silently downgraded
+/// encrypted box (Keystore wiped, entry replaced), the unreadable box files
+/// are renamed to `<name>.unreadable-<timestamp>` and kept for recovery, and
+/// a fresh empty box is opened — treated as empty, never silently downgraded
 /// to plaintext. Callers that must never write plaintext pass
 /// [requireEncryption]: when no key can be obtained at all (secure storage
 /// unavailable) they fail closed instead of opening the legacy box.
@@ -43,15 +45,46 @@ class EncryptedHive {
   /// (CRIT-014 in docs/规范/踩坑判据.md).
   static bool _encryptedBoxOnDisk(String encName) {
     if (Hive.isBoxOpen(encName)) return true;
-    // `Hive` is typed as `HiveInterface`, which exposes no path accessor; the
-    // concrete implementation that the global always is carries `homePath`.
-    final home = (Hive as dynamic).homePath as String?;
-    if (home == null || home.isEmpty) return false;
-    final delimiter = Platform.isWindows ? '\\' : '/';
-    final base = '$home$delimiter${encName.toLowerCase()}';
+    final base = _boxFileBase(encName);
+    if (base == null) return false;
     return File('$base.hive').existsSync() ||
         File('$base.hivec').existsSync() ||
         File('$base.lock').existsSync();
+  }
+
+  /// `<homePath>/<lowercased name>`, the base of a box's on-disk files:
+  /// `<base>.hive` plus optional `.hivec` / `.lock` siblings
+  /// (hive_ce `BackendManager`).
+  static String? _boxFileBase(String name) {
+    // `Hive` is typed as `HiveInterface`, which exposes no path accessor; the
+    // concrete implementation that the global always is carries `homePath`.
+    final home = (Hive as dynamic).homePath as String?;
+    if (home == null || home.isEmpty) return null;
+    final delimiter = Platform.isWindows ? '\\' : '/';
+    return '$home$delimiter${name.toLowerCase()}';
+  }
+
+  /// Renames every on-disk file of [encName] to
+  /// `<base>.unreadable-<timestamp><extension>`, so Hive no longer sees the
+  /// unreadable box while its ciphertext stays on disk for recovery.
+  ///
+  /// Never deletes. A rename that fails bubbles up (leaving the box as it
+  /// was), so an I/O error can never be mistaken for a wiped box. Synchronous
+  /// on purpose, like [_encryptedBoxOnDisk]: this can run inside a widget
+  /// test's fake-async zone, where real async file operations never complete.
+  static List<File> _quarantineUnreadableBox(String encName) {
+    final base = _boxFileBase(encName);
+    if (base == null) return const [];
+    final stamp = DateTime.now().microsecondsSinceEpoch;
+    final preserved = <File>[];
+    for (final extension in const ['.hive', '.hivec', '.lock']) {
+      final file = File('$base$extension');
+      if (!file.existsSync()) continue;
+      final target = File('$base.unreadable-$stamp$extension');
+      file.renameSync(target.path);
+      preserved.add(target);
+    }
+    return preserved;
   }
 
   /// The open box, preferring the encrypted one. Callers must check
@@ -113,8 +146,20 @@ class EncryptedHive {
         if (!kIsWeb && Platform.operatingSystem == 'ohos') {
           throw StateError('加密数据不可读，已保留原文件，请恢复密钥或备份后重试');
         }
-        // Key lost or encrypted file corrupt: treat the box as empty.
-        await hive.deleteBoxFromDisk(encName);
+        // Key lost or encrypted file corrupt. Secure storage can transiently
+        // answer with a key that no longer matches (entry wiped or replaced);
+        // deleting the box would turn that hiccup into permanent data loss.
+        // Move the unreadable files out of Hive's lookup names instead, keep
+        // them for recovery, then continue with a fresh empty box.
+        final preserved = _quarantineUnreadableBox(encName);
+        if (preserved.isEmpty) {
+          AppLog.w('hive', '加密箱 $encName 无法解密，且未找到可保留的箱文件');
+        } else {
+          final names = preserved
+              .map((file) => file.uri.pathSegments.last)
+              .join('、');
+          AppLog.w('hive', '加密箱 $encName 无法解密，原文件已保留：$names');
+        }
       }
     }
 
@@ -142,6 +187,99 @@ class EncryptedHive {
       encryptionCipher: cipher,
       compactionStrategy: strategy,
     );
+  }
+
+  /// Lazy variant of [openBox] for large chapter bodies.
+  ///
+  /// Values are decrypted on demand, so migration can inspect keys and copy
+  /// records without loading every chapter body into memory at once.
+  static Future<LazyBox<E>> openLazyBox<E>(
+    HiveInterface hive,
+    String name, {
+    SecureKeyProvider? keys,
+    bool requireEncryption = false,
+    CompactionStrategy? compactionStrategy,
+  }) async {
+    final strategy =
+        compactionStrategy ??
+        (int entries, int deleted) => deleted > 60 && deleted / entries > 0.15;
+    final encName = encryptedBoxName(name);
+    if (hive.isBoxOpen(encName)) return hive.lazyBox<E>(encName);
+
+    final key = await (keys ?? SecureKeyProvider.instance).getOrCreateKey();
+    if (key == null) {
+      if (requireEncryption) {
+        throw StateError('加密密钥不可用，拒绝以明文打开 $name');
+      }
+      if (_encryptedBoxOnDisk(encName)) {
+        throw StateError('加密密钥不可用，而 $encName 已存在，拒绝以明文回落');
+      }
+      return hive.openLazyBox<E>(name, compactionStrategy: strategy);
+    }
+
+    final cipher = HiveAesCipher(key);
+    LazyBox<E>? box;
+    if (await hive.boxExists(encName)) {
+      try {
+        box = await hive.openLazyBox<E>(
+          encName,
+          encryptionCipher: cipher,
+          compactionStrategy: strategy,
+        );
+      } on HiveError catch (e) {
+        if (!_looksLikeDecryptionFailure(e)) rethrow;
+        final preserved = _quarantineUnreadableBox(encName);
+        if (preserved.isEmpty) {
+          AppLog.w('hive', '加密箱 $encName 无法解密，且未找到可保留的箱文件');
+        } else {
+          final names = preserved
+              .map((file) => file.uri.pathSegments.last)
+              .join('、');
+          AppLog.w('hive', '加密箱 $encName 无法解密，原文件已保留：$names');
+        }
+      }
+    }
+
+    box ??= await hive.openLazyBox<E>(
+      encName,
+      encryptionCipher: cipher,
+      compactionStrategy: strategy,
+    );
+    try {
+      await _reconcileLegacyLazy(hive, name, box);
+      return box;
+    } catch (_) {
+      await box.close();
+      rethrow;
+    }
+  }
+
+  static Future<void> _reconcileLegacyLazy<E>(
+    HiveInterface hive,
+    String name,
+    LazyBox<E> encrypted,
+  ) async {
+    if (!await hive.boxExists(name)) return;
+    final legacy = await hive.openLazyBox<E>(name);
+    try {
+      final missing = <dynamic, E>{};
+      for (final key in legacy.keys) {
+        if (!encrypted.containsKey(key)) {
+          missing[key] = await legacy.get(key) as E;
+        }
+        if (missing.length >= 64) {
+          await encrypted.putAll(missing);
+          missing.clear();
+        }
+      }
+      if (missing.isNotEmpty) {
+        await encrypted.putAll(missing);
+      }
+      await encrypted.flush();
+    } finally {
+      await legacy.close();
+    }
+    await hive.deleteBoxFromDisk(name);
   }
 
   /// Reconciles a leftover legacy box with the encrypted box.

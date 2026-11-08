@@ -155,6 +155,9 @@ void _handleChapterCompleted(
   // _openChapter resets completion before its source is ready.
   // The next player's playing event will publish the actual start.
   c._publishListeningSession(playing: false);
+  // 官方 onPlayCompletion（d.java:92-100）收起播放/同步按钮；阅读页据此
+  // 停止显示，下一章起播时由 update(playing:true) 清掉。
+  ListeningSession.instance.markCompleted();
 }
 
 /// 控制器对外的只读查询与跳过配置写入。
@@ -208,15 +211,16 @@ Future<SubtitleTrack?> _synthesizeSubtitles(
   }
   final duration = c._duration;
   if (duration <= Duration.zero) return null;
+  final String text;
   try {
-    final text = await ApiClient.instance.contentText(itemId);
-    if (text.trim().isEmpty) return null;
-    return SubtitleSynthesis.build(
-      text: text,
-      duration: duration,
-      anchors: c._timeTrack,
-    );
+    text = await ApiClient.instance.contentText(itemId);
   } catch (_) {
     return null;
   }
+  if (text.trim().isEmpty) return null;
+  return SubtitleSynthesis.buildAsync(
+    text: text,
+    duration: duration,
+    anchors: c._timeTrack,
+  );
 }

@@ -73,7 +73,7 @@ class _DetailDirectorySheetState extends State<DetailDirectorySheet> {
       for (var index = 0; index < widget.chapters.length; index++)
         if (query.isEmpty ||
             (ordinal != null
-                ? index + 1 == ordinal
+                ? widget.chapters[index].hasKnownIndex && index + 1 == ordinal
                 : widget.chapters[index].title.toLowerCase().contains(query) ||
                       widget.chapters[index].volumeName.toLowerCase().contains(
                         query,
@@ -87,6 +87,10 @@ class _DetailDirectorySheetState extends State<DetailDirectorySheet> {
     _search.clear();
     setState(_filter);
   }
+
+  /// Chapters listed before the saved one count as already read.
+  bool _isRead(int index) =>
+      widget.currentIndex != null && index < widget.currentIndex!;
 
   @override
   Widget build(BuildContext context) {
@@ -148,7 +152,9 @@ class _DetailDirectorySheetState extends State<DetailDirectorySheet> {
                     ),
                     const SizedBox(height: 3),
                     Text(
-                      '共 ${widget.chapters.length} ${widget.chapterUnit}',
+                      hasCompleteEpisodeCatalogue(widget.chapters)
+                          ? '共 ${widget.chapters.length} ${widget.chapterUnit}'
+                          : '完整目录暂不可用',
                       style: TextStyle(color: palette.muted, fontSize: 12),
                     ),
                     const SizedBox(height: 20),
@@ -304,8 +310,8 @@ class _DetailDirectorySheetState extends State<DetailDirectorySheet> {
                             'detail_directory_chapter_${chapter.itemId}',
                           ),
                           chapter: chapter,
-                          index: index,
                           current: index == widget.currentIndex,
+                          read: _isRead(index),
                           onTap: () => Navigator.pop(context, chapter),
                         ),
                       ],

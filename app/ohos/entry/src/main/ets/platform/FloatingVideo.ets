@@ -16,6 +16,7 @@ export class FloatingVideo {
   private controller: PiPWindow.PiPController | null = null;
   private node: typeNode.XComponent | null = null;
   private playerId: number = 0;
+  private owner: number = 0;
   private surface: string | null = null;
   private started: boolean = false;
   private stopping: boolean = false;
@@ -41,7 +42,8 @@ export class FloatingVideo {
       type: XComponentType.SURFACE, controller: surfaceController
     });
     node.attribute.width('100%').height('100%');
-    this.node = node; this.playerId = playerId; this.stopping = false; this.restoring = false;
+    this.node = node; this.playerId = playerId; this.owner = call.argument('owner') as number;
+    this.stopping = false; this.restoring = false;
     surfaceController.changed = (surface: string | null): void => {
       if (this.node !== node) { return; }
       this.surface = surface;
@@ -131,7 +133,10 @@ export class FloatingVideo {
       try { this.target(this.playerId, null); } catch (_) { /* player may already be disposed */ }
     }
   }
-  private action(action: string): void { this.channel.invokeMethod('onNotificationAction', action); }
+  private action(action: string): void {
+    const args = new Map<string, Object>(); args.set('owner', this.owner); args.set('action', action);
+    this.channel.invokeMethod('onFloatingAction', args);
+  }
   private size(call: MethodCall, name: string, fallback: number): number {
     const value = call.argument(name) as number;
     return Number.isFinite(value) && value > 0 && value <= 16384 ? value : fallback;

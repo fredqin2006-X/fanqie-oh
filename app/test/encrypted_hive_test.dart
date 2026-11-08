@@ -37,15 +37,8 @@ void main() {
     await box.put('k1', {'text': sentinel});
     await box.close();
 
-    final files = dir
-        .listSync()
-        .whereType<File>()
-        .map((f) => f.path)
-        .toList();
-    expect(
-      files.any((p) => p.endsWith('chapter_cache_v1_enc.hive')),
-      isTrue,
-    );
+    final files = dir.listSync().whereType<File>().map((f) => f.path).toList();
+    expect(files.any((p) => p.endsWith('chapter_cache_v1_enc.hive')), isTrue);
     for (final path in files) {
       final bytes = File(path).readAsBytesSync();
       expect(
@@ -70,11 +63,7 @@ void main() {
     await legacy.put('b', {'title': 'Book B'});
     await legacy.close();
 
-    final box = await EncryptedHive.openBox<dynamic>(
-      Hive,
-      'shelf',
-      keys: keys,
-    );
+    final box = await EncryptedHive.openBox<dynamic>(Hive, 'shelf', keys: keys);
     expect((box.get('a') as Map)['title'], 'Book A');
     expect((box.get('b') as Map)['title'], 'Book B');
     expect(await Hive.boxExists('shelf'), isFalse);
@@ -96,29 +85,19 @@ void main() {
     await partial.put('a', {'title': 'Book A'});
     await partial.close();
 
-    final box = await EncryptedHive.openBox<dynamic>(
-      Hive,
-      'shelf',
-      keys: keys,
-    );
+    final box = await EncryptedHive.openBox<dynamic>(Hive, 'shelf', keys: keys);
     expect((box.get('a') as Map)['title'], 'Book A');
     expect((box.get('b') as Map)['title'], 'Book B');
     expect(await Hive.boxExists('shelf'), isFalse);
   });
 
   test('lost key treats the encrypted box as empty', () async {
-    final box = await EncryptedHive.openBox<dynamic>(
-      Hive,
-      'shelf',
-      keys: keys,
-    );
+    final box = await EncryptedHive.openBox<dynamic>(Hive, 'shelf', keys: keys);
     await box.put('a', {'title': 'Book A'});
     await box.close();
 
     // Fresh secure storage => fresh key that cannot open the old box.
-    final lostKeys = SecureKeyProvider(
-      storage: InMemorySecureKeyStorage(),
-    );
+    final lostKeys = SecureKeyProvider(storage: InMemorySecureKeyStorage());
     final reopened = await EncryptedHive.openBox<dynamic>(
       Hive,
       'shelf',
@@ -128,18 +107,54 @@ void main() {
     expect(reopened.get('a'), isNull);
   });
 
-  test('malformed stored key is preserved and never silently replaced', () async {
-    await storage.write(
-      SecureKeyProvider.hiveBoxKeyName,
-      base64Encode(Uint8List.fromList([1, 2, 3])),
+  test('lost key keeps the unreadable box and opens a fresh one', () async {
+    final box = await EncryptedHive.openBox<dynamic>(Hive, 'shelf', keys: keys);
+    await box.put('a', {'title': 'Book A'});
+    await box.close();
+    final original = File('${dir.path}/shelf_enc.hive');
+    expect(original.existsSync(), isTrue);
+    final originalBytes = original.readAsBytesSync();
+
+    // A transient Keystore hiccup hands back a key that cannot open the box.
+    // Its ciphertext must survive: renamed out of Hive's lookup names, never
+    // deleted, with a fresh empty box taking its place.
+    final lostKeys = SecureKeyProvider(storage: InMemorySecureKeyStorage());
+    final reopened = await EncryptedHive.openBox<dynamic>(
+      Hive,
+      'shelf',
+      keys: lostKeys,
     );
-    final key = await keys.getOrCreateKey();
-    expect(key, isNull);
-    expect(
-      base64Decode((await storage.read(SecureKeyProvider.hiveBoxKeyName))!),
-      [1, 2, 3],
-    );
+    expect(reopened.isEmpty, isTrue);
+    await reopened.put('b', {'title': 'Book B'});
+    expect((reopened.get('b') as Map)['title'], 'Book B');
+
+    final preserved = dir
+        .listSync()
+        .whereType<File>()
+        .where((file) => file.path.contains('.unreadable-'))
+        .toList();
+    expect(preserved, hasLength(1));
+    expect(preserved.single.path, contains('shelf_enc.unreadable-'));
+    expect(preserved.single.readAsBytesSync(), originalBytes);
+    // The new empty box lives at the normal name again.
+    expect(await Hive.boxExists('shelf_enc'), isTrue);
   });
+
+  test(
+    'malformed stored key is preserved and never silently replaced',
+    () async {
+      await storage.write(
+        SecureKeyProvider.hiveBoxKeyName,
+        base64Encode(Uint8List.fromList([1, 2, 3])),
+      );
+      final key = await keys.getOrCreateKey();
+      expect(key, isNull);
+      expect(
+        base64Decode((await storage.read(SecureKeyProvider.hiveBoxKeyName))!),
+        [1, 2, 3],
+      );
+    },
+  );
 
   test('unavailable secure storage degrades to the legacy box', () async {
     final failing = _ThrowingStorage();
@@ -194,6 +209,11 @@ class _ThrowingStorage implements SecureKeyStorage {
 
   @override
   Future<void> write(String key, String value) async {
+    throw StateError('secure storage unavailable');
+  }
+
+  @override
+  Future<void> delete(String key) async {
     throw StateError('secure storage unavailable');
   }
 }

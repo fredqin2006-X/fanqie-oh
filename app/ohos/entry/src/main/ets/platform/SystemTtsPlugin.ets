@@ -91,6 +91,7 @@ export class SystemTtsPlugin implements FlutterPlugin, MethodCallHandler, Stream
               volume: 1, pitch: 1, languageContext: 'zh-CN', audioType: 'pcm',
               playType: this.rate > 2 ? 0 : 1, soundChannel: 3, queueMode: queued ? 1 : 0 } }); result.success(null); break;
           }
+          case 'pause':
           case 'stop': this.requests.clear(); this.current = ''; this.engine?.stop(); await this.stopPcm(); result.success(null); break;
           case 'shutdown': await this.close(); result.success(null); break;
           case 'settings': result.error('TTS_SETTINGS_UNAVAILABLE', '鸿蒙系统音色由系统管理，请在系统设置中调整', null); break;

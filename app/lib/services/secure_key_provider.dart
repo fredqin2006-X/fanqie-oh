@@ -12,6 +12,7 @@ import 'package:hive_ce/hive.dart';
 abstract interface class SecureKeyStorage {
   Future<String?> read(String key);
   Future<void> write(String key, String value);
+  Future<void> delete(String key);
 }
 
 /// HarmonyOS uses a non-exportable HUKS wrapping key. Errors propagate so a
@@ -25,6 +26,10 @@ class HarmonySecureKeyStorage implements SecureKeyStorage {
   @override
   Future<void> write(String key, String value) =>
       _channel.invokeMethod<void>('write', {'key': key, 'value': value});
+
+  @override
+  Future<void> delete(String key) =>
+      _channel.invokeMethod<void>('delete', {'key': key});
 }
 
 /// Production backend: `flutter_secure_storage` (Android Keystore /
@@ -41,6 +46,9 @@ class FlutterSecureKeyStorage implements SecureKeyStorage {
   @override
   Future<void> write(String key, String value) =>
       _storage.write(key: key, value: value);
+
+  @override
+  Future<void> delete(String key) => _storage.delete(key: key);
 }
 
 /// In-memory fake for tests and for environments without a platform channel.
@@ -53,6 +61,11 @@ class InMemorySecureKeyStorage implements SecureKeyStorage {
   @override
   Future<void> write(String key, String value) async {
     _values[key] = value;
+  }
+
+  @override
+  Future<void> delete(String key) async {
+    _values.remove(key);
   }
 }
 

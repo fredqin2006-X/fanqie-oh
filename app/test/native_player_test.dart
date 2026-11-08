@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:fqapp/models/media_item.dart';
+import 'package:fqapp/services/app_log.dart';
 import 'package:fqapp/services/audio_preferences.dart';
 import 'package:fqapp/services/native_player.dart';
 import 'package:fqapp/widgets/video_player_chrome.dart';
@@ -186,6 +187,54 @@ void main() {
       expect(calls.where((call) => call.method == 'play'), isEmpty);
     },
   );
+
+  nativeTest('a failed native dispose is logged and retried', (
+    tester,
+    player,
+  ) async {
+    createGate = Completer<Map<String, dynamic>>();
+    var disposeAttempts = 0;
+    final warningsBefore = AppLog.instance.entries
+        .where((entry) => entry.tag == 'player-native')
+        .length;
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(_methods, (call) async {
+      calls.add(call);
+      if (call.method == 'create') {
+        return createGate?.future ?? Future.value({'playerId': 71});
+      }
+      if (call.method == 'dispose') {
+        disposeAttempts++;
+        if (disposeAttempts == 1) {
+          throw PlatformException(code: 'dispose-unavailable');
+        }
+      }
+      return null;
+    });
+
+    final creation = player
+        .create('https://example.invalid/late.mp4', '')
+        .then<Object>((value) => value, onError: (Object error) => error);
+    await tester.pump();
+    await player.dispose();
+    await tester.pump();
+    createGate!.complete({'playerId': 71});
+    for (var i = 0; i < 6 && disposeAttempts < 2; i++) {
+      await tester.pump();
+    }
+    await tester.pump();
+
+    expect(await creation, isStateError);
+    // 失败没有被记忆化：迟到的 create 回复触发的第二次释放成功了。
+    expect(disposeAttempts, 2);
+    expect(
+      AppLog.instance.entries
+          .where((entry) => entry.tag == 'player-native')
+          .length,
+      warningsBefore + 1,
+    );
+  });
 
   nativeTest('all dispose callers wait for the same native release', (
     tester,
@@ -551,9 +600,9 @@ void main() {
     },
   );
 
-  // issue #129：变速引擎只对听书（纯音频）播放器下发，否则原生侧会给视频
-  // 也打开 AudioTrack 变速，画面与声音不再步进同一套计时。
-  testWidgets('audio players request the platform rate engine on create', (
+  // issue #129 / #170：变速引擎只对听书（纯音频）播放器下发，否则原生侧会让
+  // 视频也走 AudioTrack 变速；默认内建 Sonic（1.0.121 的行为）。
+  testWidgets('audio players request the built-in rate engine on create', (
     tester,
   ) async {
     AudioPreferences.instance.resetForTest();
@@ -576,7 +625,7 @@ void main() {
           .arguments
           as Map<Object?, Object?>;
       expect(arguments['audioOnly'], true);
-      expect(arguments['audioRateEngine'], 'wsola');
+      expect(arguments['audioRateEngine'], 'builtIn');
     } finally {
       await player.dispose();
       await tester.pump();

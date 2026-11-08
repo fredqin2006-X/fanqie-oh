@@ -71,7 +71,15 @@ void main() {
             }
             await tester.binding.setSurfaceSize(const Size(800, 450));
             await tester.pump(const Duration(milliseconds: 100));
-            expect(orientations.last, ['DeviceOrientation.landscapeLeft']);
+            expect(
+              orientations.last,
+              immediate || !portraitSource
+                  ? [
+                      'DeviceOrientation.landscapeLeft',
+                      'DeviceOrientation.landscapeRight',
+                    ]
+                  : ['DeviceOrientation.portraitUp'],
+            );
             expect(find.byKey(const ValueKey('actual-video')), findsOneWidget);
             await tester.pump(const Duration(seconds: 4));
             expect(find.byType(IconButton), findsNothing);

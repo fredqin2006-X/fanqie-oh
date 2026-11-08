@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 use base64::Engine;
@@ -43,7 +43,21 @@ const DIRECTORY_READING_QUERY_SUFFIX: &str = "&book_info_md5=&need_version=true&
 
 const VIDEO_DETAIL_PATH: &str = "/novel/player/video_detail/v1/";
 
-static VIDEO_CACHE_LOCK: Lazy<tokio::sync::Mutex<()>> = Lazy::new(|| tokio::sync::Mutex::new(()));
+type CacheLocks = HashMap<PathBuf, Weak<tokio::sync::Mutex<()>>>;
+static VIDEO_CACHE_LOCKS: Lazy<Mutex<CacheLocks>> = Lazy::new(|| Mutex::new(HashMap::new()));
+static VIDEO_DOWNLOADS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
+fn cache_entry_lock(path: &Path) -> Arc<tokio::sync::Mutex<()>> {
+    let key = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut locks = VIDEO_CACHE_LOCKS.lock().unwrap_or_else(|e| e.into_inner());
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(key, Arc::downgrade(&lock));
+    lock
+}
 
 // Note: 编码拒绝必须穿透回退链，见 .agents/notes/implemented/bug-fix/2026-09-25-video-codec-gates.md
 #[derive(Debug, PartialEq, Eq)]
@@ -56,6 +70,24 @@ enum VideoSourceResolution {
 impl VideoSourceResolution {
     fn is_terminal(&self) -> bool {
         !matches!(self, Self::NotFound)
+    }
+}
+
+struct ParsedVideoResponse {
+    root: Value,
+    models: Vec<Map<String, Value>>,
+}
+
+impl ParsedVideoResponse {
+    fn parse(raw: &[u8]) -> ApiResult<Self> {
+        let root: Value = serde_json::from_slice(raw)
+            .map_err(|e| ApiError::Internal(format!("parse upstream json: {e}")))?;
+        let models = root
+            .get("data")
+            .and_then(Value::as_object)
+            .map(|data| video_models(data).collect())
+            .unwrap_or_default();
+        Ok(Self { root, models })
     }
 }
 
@@ -77,11 +109,27 @@ fn handle_video<'a>(ctx: &'a Ctx, params: &'a Params) -> BoxFuture<'a, ApiResult
         // 了的 bytevc2（实测 2026-10-12 同一集对拍）。二选一必然少档：只信
         // shortplay 会丢 1080P，只信 phoenix 会让低档被编码门整片丢掉。
         // 两个请求互不依赖，并发发出，不额外占用一个往返。
-        let (raw, phoenix_raw) = if stream_mode {
-            let (shortplay, phoenix) = tokio::join!(
-                fetch_shortplay_video_model(ctx, &video_id),
-                fetch_phoenix_video_model(ctx, &video_id),
-            );
+        let (parsed, phoenix_parsed, resolved) = if stream_mode {
+            // Resolve the primary source while quality metadata is loading.
+            // A primary failure cancels the auxiliary work, but auxiliary
+            // failure remains non-fatal and successful tiers are never cut off.
+            let primary = async {
+                let parsed = ParsedVideoResponse::parse(
+                    &fetch_shortplay_video_model(ctx, &video_id).await?,
+                )?;
+                let resolved = resolve_video_source(ctx, &parsed).await;
+                if resolved == VideoSourceResolution::CodecRejected {
+                    return Err(ApiError::Internal("该视频暂不支持播放".to_string()));
+                }
+                Ok((parsed, resolved))
+            };
+            let auxiliary = async {
+                let response = fetch_phoenix_video_model(ctx, &video_id)
+                    .await
+                    .and_then(|raw| ParsedVideoResponse::parse(&raw));
+                Ok::<_, ApiError>(response)
+            };
+            let ((parsed, resolved), phoenix) = tokio::try_join!(primary, auxiliary)?;
             // 凤凰那条失败原先被 `.ok()` 静默吃掉，而 1080P 只可能来自它那条
             // 列表（短剧专用接口自带列表与其 `fallback_api` 都只到 720P）——
             // 失败即面板少一档且毫无痕迹。**HTTP 成功不等于业务成功**：实测
@@ -91,30 +139,41 @@ fn handle_video<'a>(ctx: &'a Ctx, params: &'a Params) -> BoxFuture<'a, ApiResult
             // Note: 为什么静默会丢一整档、以及日志里刻意不记什么 —
             // 见 .agents/notes/implemented/bug-fix/2026-10-14-phoenix-reject-silent-quality-loss.md
             match &phoenix {
-                Ok(body) if phoenix_model_usable(body) => {}
+                Ok(body) if body.root.get("data").is_some_and(Value::is_object) => {}
                 Ok(body) => log::warn!(
                     "video {video_id}: phoenix body unusable (quality tiers lost): {}",
-                    envelope_of_body(body)
+                    body_envelope(&body.root)
                 ),
                 Err(error) => log::warn!(
                     "video {video_id}: phoenix request failed (quality tiers lost): {}",
                     error.message()
                 ),
             }
-            (shortplay?, phoenix.ok())
+            (parsed, phoenix.ok(), resolved)
         } else {
-            (fetch_phoenix_video_model(ctx, &video_id).await?, None)
+            let parsed =
+                ParsedVideoResponse::parse(&fetch_phoenix_video_model(ctx, &video_id).await?)?;
+            let resolved = resolve_video_source(ctx, &parsed).await;
+            (parsed, None, resolved)
         };
 
-        let (video_url, content_key) = match resolve_video_source(ctx, &raw).await {
+        // 官方 `wp3/o1.java:301-347` 的 `isSupportShowLandIcon` 按服务端
+        // `vertical` 决定竖屏剧集是否给「全屏观看」（竖屏不给）。该字段随
+        // 每集的 `VideoInfo.vertical` 下发，合成的取流响应原先把它丢了；
+        // 这里透传出去，缺字段时为 null（Dart 侧保持旧行为，见 player_page）。
+        let vertical = episode_vertical_value(&parsed.root).or_else(|| {
+            phoenix_parsed
+                .as_ref()
+                .and_then(|extra| episode_vertical_value(&extra.root))
+        });
+
+        let (video_url, content_key) = match resolved {
             VideoSourceResolution::Found(url, key) => (url, key),
             VideoSourceResolution::CodecRejected => {
                 return Err(ApiError::Internal("该视频暂不支持播放".to_string()));
             }
             VideoSourceResolution::NotFound => {
-                let data: Value = serde_json::from_slice(&raw)
-                    .map_err(|e| ApiError::Internal(format!("parse upstream json: {e}")))?;
-                return Ok(data);
+                return Ok(parsed.root);
             }
         };
 
@@ -122,9 +181,12 @@ fn handle_video<'a>(ctx: &'a Ctx, params: &'a Params) -> BoxFuture<'a, ApiResult
             "video_url": video_url,
             "key_hex": hex::encode(&content_key),
             "video_id": video_id,
+            // 分集方向（官方 `VideoInfo.vertical`）：缺字段时 null，客户端
+            // 据此保持旧行为（显示「全屏观看」）。
+            "vertical": vertical,
             // 全量兼容档（高→低）。官方面板按该列表渲染清晰度行；空数组
             // 表示单流，客户端隐藏清晰度入口。
-            "variants": extract_stream_variants(ctx, &raw, phoenix_raw.as_deref()).await,
+            "variants": extract_stream_variants(ctx, &parsed, phoenix_parsed.as_ref()).await,
         });
         if stream_mode {
             return Ok(source);
@@ -136,6 +198,7 @@ fn handle_video<'a>(ctx: &'a Ctx, params: &'a Params) -> BoxFuture<'a, ApiResult
                 Ok(json!({
                     "video_url": local_path,
                     "video_id": video_id,
+                    "vertical": vertical,
                     "video_info": {
                         "data": {
                             "video_list": {
@@ -217,11 +280,16 @@ async fn fetch_shortplay_video_model(ctx: &Ctx, video_id: &str) -> ApiResult<Vec
 }
 
 /// Parses the multi_video_model response and extracts the best quality MP4 URL.
+#[cfg(test)]
 fn extract_video_url(raw: &[u8]) -> VideoSourceResolution {
-    let Ok(resp) = serde_json::from_slice::<Value>(raw) else {
+    let Ok(parsed) = ParsedVideoResponse::parse(raw) else {
         return VideoSourceResolution::NotFound;
     };
-    let Some(data) = resp.get("data").and_then(|d| d.as_object()) else {
+    extract_parsed_video_url(&parsed)
+}
+
+fn extract_parsed_video_url(parsed: &ParsedVideoResponse) -> VideoSourceResolution {
+    let Some(data) = parsed.root.get("data").and_then(Value::as_object) else {
         return VideoSourceResolution::NotFound;
     };
 
@@ -230,8 +298,8 @@ fn extract_video_url(raw: &[u8]) -> VideoSourceResolution {
         return direct;
     }
 
-    for model in video_models(data) {
-        let source = extract_video_model_url(&model);
+    for model in &parsed.models {
+        let source = extract_video_model_url(model);
         if source.is_terminal() {
             return source;
         }
@@ -265,23 +333,69 @@ fn extract_video_info_list_map_url(data: &Map<String, Value>) -> VideoSourceReso
     extract_video_list_source(play_info_list)
 }
 
-async fn resolve_video_source(ctx: &Ctx, raw: &[u8]) -> VideoSourceResolution {
-    let Ok(resp) = serde_json::from_slice::<Value>(raw) else {
-        return VideoSourceResolution::NotFound;
-    };
-    let Some(data) = resp.get("data").and_then(|d| d.as_object()) else {
-        return VideoSourceResolution::NotFound;
-    };
+/// The episode's `vertical` flag from a multi_video_model response.
+///
+/// Official models it as `com.bytedance.rpc.model.VideoInfo.vertical` (a
+/// `short`) on each entry of `data.video_info_list_map`; the short-drama page
+/// shows 「全屏观看」 only when `!saasVideoData.isVertical()`
+/// (`wp3/o1.java:301-347`, data copied from `EpisodeInfo.vertical` in
+/// `th3/e.java:95`). `None` means the response carried no field at all — the
+/// caller then leaves the client's old behaviour alone.
+fn episode_vertical_value(resp: &Value) -> Option<bool> {
+    let data = resp.get("data")?.as_object()?;
+    if let Some(found) = data.get("vertical").and_then(vertical_flag) {
+        return Some(found);
+    }
+    if let Some(video_map) = data.get("video_info_list_map").and_then(|v| v.as_object()) {
+        for list in video_map.values() {
+            let Some(arr) = list.as_array() else { continue };
+            for entry in arr {
+                if let Some(found) = entry.get("vertical").and_then(vertical_flag) {
+                    return Some(found);
+                }
+            }
+        }
+    }
+    // Shortplay shape: `data.<vid>` is the VideoInfo itself (beside its
+    // `video_model` string), so the flag sits one level up from the quality
+    // list rather than in `video_info_list_map`.
+    for value in data.values() {
+        if let Some(found) = value.get("vertical").and_then(vertical_flag) {
+            return Some(found);
+        }
+    }
+    None
+}
 
-    for model in video_models(data) {
-        let source = extract_shortplay_video_model_source(&model);
+#[cfg(test)]
+fn episode_vertical(raw: &[u8]) -> Option<bool> {
+    episode_vertical_value(&serde_json::from_slice::<Value>(raw).ok()?)
+}
+
+/// Lenient `vertical` decoding: upstream may send bool, 0/1, or "true"/"1".
+fn vertical_flag(value: &Value) -> Option<bool> {
+    match value {
+        Value::Bool(flag) => Some(*flag),
+        Value::Number(number) => number.as_i64().map(|v| v != 0),
+        Value::String(text) => match text.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" => Some(true),
+            "false" | "0" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+async fn resolve_video_source(ctx: &Ctx, parsed: &ParsedVideoResponse) -> VideoSourceResolution {
+    for model in &parsed.models {
+        let source = extract_shortplay_video_model_source(model);
         if source.is_terminal() {
             return source;
         }
-        if !video_model_encrypted(&model) {
+        if !video_model_encrypted(model) {
             continue;
         }
-        let fallback_url = fallback_api_url(&model);
+        let fallback_url = fallback_api_url(model);
         if fallback_url.is_empty() {
             continue;
         }
@@ -293,7 +407,7 @@ async fn resolve_video_source(ctx: &Ctx, raw: &[u8]) -> VideoSourceResolution {
         }
     }
 
-    extract_video_url(raw)
+    extract_parsed_video_url(parsed)
 }
 
 fn extract_shortplay_video_model_source(model: &Map<String, Value>) -> VideoSourceResolution {
@@ -392,18 +506,14 @@ fn variant_display_name(height: i64) -> String {
 /// 720P 为止（各档 h265），phoenix 模型的 fallback 才有 1080p（低档是解不了的
 /// bytevc2）。只看一份会静默少档。Returns `[]` when no body yields a variant —
 /// the client then hides the quality row entirely (official `oi3/k.P()` gate).
-async fn extract_stream_variants(ctx: &Ctx, raw: &[u8], extra: Option<&[u8]>) -> Vec<Value> {
+async fn extract_stream_variants(
+    ctx: &Ctx,
+    parsed: &ParsedVideoResponse,
+    extra: Option<&ParsedVideoResponse>,
+) -> Vec<Value> {
     let mut scored = Vec::new();
-    // 读不动的 body 直接跳过、不报错：`extra`（凤凰）是不是可用由调用点判并告警，
-    // 那里才有剧集 id 可以把日志和一次播放对起来。
-    for body in std::iter::once(raw).chain(extra) {
-        let Ok(resp) = serde_json::from_slice::<Value>(body) else {
-            continue;
-        };
-        let Some(data) = resp.get("data").and_then(|d| d.as_object()) else {
-            continue;
-        };
-        for model in video_models(data) {
+    for body in std::iter::once(parsed).chain(extra) {
+        for model in &body.models {
             // NOTE: 不用 video_model_encrypted() 做前置——它只认数组形状的
             // video_list；实测漫剧（series 7686494169098898456）的 video_list 是
             // object 且未标 encrypt，但每档照常带 spade_a/kid，选流门照常适用。
@@ -415,7 +525,7 @@ async fn extract_stream_variants(ctx: &Ctx, raw: &[u8], extra: Option<&[u8]>) ->
                     .filter(|s| !s.is_empty())
                     .and_then(|s| audio_b64_decode(s).ok()),
             ));
-            scored.extend(fallback_variant_rows(ctx, &model).await);
+            scored.extend(fallback_variant_rows(ctx, model).await);
         }
     }
     merge_variant_rows(scored)
@@ -473,18 +583,6 @@ fn merge_variant_rows(scored: Vec<(i64, Value)>) -> Vec<Value> {
     out.into_iter().map(|(_, row)| row).collect()
 }
 
-/// 凤凰那条响应是否可用：`data` 必须是个对象。
-///
-/// HTTP 成功不等于业务成功——上游业务失败时回的是火山错误封包
-/// `{BaseResp, Code, Message}`（无 `data`），状态码仍是 200。看状态码判不出来，
-/// 只能看外壳，所以这里单独判一次由调用点告警。
-fn phoenix_model_usable(body: &[u8]) -> bool {
-    serde_json::from_slice::<Value>(body)
-        .ok()
-        .and_then(|resp| resp.get("data").map(Value::is_object))
-        .unwrap_or(false)
-}
-
 /// 把一份响应的**外壳**压成一行：顶层键名、`data` 的类型、`code`/`Code`、
 /// `message`/`Message` 与 `BaseResp`。
 ///
@@ -506,14 +604,6 @@ fn body_envelope(resp: &Value) -> String {
         line.push_str(&format!(" BaseResp={}", truncated(base, 240)));
     }
     line
-}
-
-/// 一份响应字节流的外壳；不是 JSON 就报长度。
-fn envelope_of_body(body: &[u8]) -> String {
-    match serde_json::from_slice::<Value>(body) {
-        Ok(resp) => body_envelope(&resp),
-        Err(_) => format!("not json len={}", body.len()),
-    }
 }
 
 /// 按候选键名取一个标量并渲染成短字符串，都取不到给 `-`。
@@ -689,7 +779,14 @@ fn fallback_api_url(model: &Map<String, Value>) -> String {
 }
 
 async fn fetch_fallback_video_info(ctx: &Ctx, u: &str) -> Option<Map<String, Value>> {
-    let raw = unsigned_get(ctx, u, FALLBACK_USER_AGENT).await?;
+    // JSON response: same 64 MiB cap as every other API call.
+    let raw = unsigned_get(
+        ctx,
+        u,
+        FALLBACK_USER_AGENT,
+        crate::upstream::http::API_BODY_LIMIT_BYTES,
+    )
+    .await?;
     serde_json::from_slice::<Value>(&raw)
         .ok()?
         .as_object()
@@ -1151,8 +1248,10 @@ fn dir_item_count(dm: &Map<String, Value>) -> i64 {
 // HTTP + on-disk cache
 // ---------------------------------------------------------------------------
 
-/// Plain, unsigned GET with an explicit User-Agent.
-async fn unsigned_get(ctx: &Ctx, url: &str, user_agent: &str) -> Option<Vec<u8>> {
+/// Plain, unsigned GET with an explicit User-Agent. The body is rejected once
+/// it exceeds `max_bytes`; callers pass the shared API cap for JSON responses
+/// and the per-file video cap for whole-body download fallbacks.
+async fn unsigned_get(ctx: &Ctx, url: &str, user_agent: &str, max_bytes: usize) -> Option<Vec<u8>> {
     let req = UpstreamRequest {
         method: Some("GET".to_string()),
         url: url.to_string(),
@@ -1161,7 +1260,7 @@ async fn unsigned_get(ctx: &Ctx, url: &str, user_agent: &str) -> Option<Vec<u8>>
         no_sign: true,
         pin: None,
     };
-    match ctx.up.do_request(&req).await {
+    match ctx.up.do_request_capped(&req, max_bytes).await {
         Ok((body, _)) => Some(body),
         Err(_) => None,
     }
@@ -1217,6 +1316,7 @@ async fn stream_download_to_file_with_cap(
     let client = streaming_client().ok_or_else(|| "streaming client unavailable".to_string())?;
     let mut resp = client
         .get(url)
+        .timeout(crate::upstream::budget::cap_timeout(VIDEO_DOWNLOAD_TIMEOUT))
         .header(reqwest::header::USER_AGENT, user_agent)
         .send()
         .await
@@ -1264,14 +1364,14 @@ async fn download_and_save(
     video_url: &str,
     content_key: &[u8],
 ) -> Result<String, String> {
-    let _guard = VIDEO_CACHE_LOCK.lock().await;
-
     let src_dir = if ctx.src_dir.is_empty() {
         "src".to_string()
     } else {
         ctx.src_dir.clone()
     };
-    std::fs::create_dir_all(&src_dir).map_err(|e| e.to_string())?;
+    tokio::fs::create_dir_all(&src_dir)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let mut ext = ".mp4".to_string();
     if let Some(idx) = video_url.rfind('.') {
@@ -1287,33 +1387,45 @@ async fn download_and_save(
 
     let filename = format!("{video_id}{ext}");
     let fp = Path::new(&src_dir).join(&filename);
+    let guard = cache_entry_lock(&fp).lock_owned().await;
 
-    if let Ok(info) = std::fs::metadata(&fp) {
+    if let Ok(info) = tokio::fs::metadata(&fp).await {
         if info.len() > 0 {
             // The cache keeps the downloaded bytes exactly as they arrived
             // (CENC-encrypted when the source is encrypted); the serve path
             // decrypts ranges on demand. All this path has to do is keep the
             // key sidecar in place — which also repairs a sidecar lost to a
             // crash between the download's rename and its sidecar write.
-            if !content_key.is_empty()
-                && cache_cenc_state(&fp) == CacheCencState::Encrypted
-                && read_key_sidecar(&fp).as_deref() != Some(content_key)
-            {
-                write_key_sidecar(&fp, content_key)?;
-            }
+            // The moov/sidecar reads are blocking file I/O, so they run on
+            // the blocking pool instead of an async worker.
+            let cache_path = fp.clone();
+            let cache_key = content_key.to_vec();
+            tokio::task::spawn_blocking(move || {
+                let _guard = guard;
+                if !cache_key.is_empty()
+                    && cache_cenc_state(&cache_path) == CacheCencState::Encrypted
+                    && read_key_sidecar(&cache_path).as_deref() != Some(cache_key.as_slice())
+                {
+                    write_key_sidecar(&cache_path, &cache_key)?;
+                }
+                Ok::<(), String>(())
+            })
+            .await
+            .map_err(|e| e.to_string())??;
             return Ok(format!("/src/{filename}"));
         }
     }
 
+    // Cache hits do not queue behind unrelated downloads. Same-file callers
+    // share the entry lock; different misses use a small global IO budget.
+    let download_slot = VIDEO_DOWNLOADS.acquire().await.map_err(|e| e.to_string())?;
     let part_path = PathBuf::from(format!("{}.part", fp.display()));
-    let _ = std::fs::remove_file(&part_path);
+    let _ = tokio::fs::remove_file(&part_path).await;
 
     if streaming_client().is_some() {
         // Streaming download: the body is written chunk by chunk and never
-        // held whole in memory (P1-9). `VIDEO_CACHE_LOCK` above still
-        // serializes downloads; the lock is kept because the cache file,
-        // the key sidecar, and the prune pass below are not safe to run
-        // concurrently for the same video.
+        // held whole in memory (P1-9). The entry lock keeps the cache file
+        // and its key sidecar serialized for the same video.
         // The streaming client bypasses `UpstreamClient::do_request`, so
         // apply the mock-origin rewrite here; without it the download
         // would go to the real upstream instead of the mock server and
@@ -1322,41 +1434,61 @@ async fn download_and_save(
         if let Err(err) =
             stream_download_to_file(&download_url, UA_WINDOWS_BROWSER, &part_path).await
         {
-            let _ = std::fs::remove_file(&part_path);
+            let _ = tokio::fs::remove_file(&part_path).await;
             return Err(err);
         }
     } else {
         // No TLS provider installed in this process (unit-test embedding
         // without the upstream transport): fall back to the shared
-        // whole-body download instead of failing outright.
-        let data = unsigned_get(ctx, video_url, UA_WINDOWS_BROWSER)
-            .await
-            .ok_or_else(|| "download video: request failed".to_string())?;
+        // whole-body download instead of failing outright. The per-file
+        // video cap still bounds the read.
+        let data = unsigned_get(
+            ctx,
+            video_url,
+            UA_WINDOWS_BROWSER,
+            MAX_VIDEO_DOWNLOAD_BYTES as usize,
+        )
+        .await
+        .ok_or_else(|| "download video: request failed".to_string())?;
         if data.len() as u64 > MAX_VIDEO_DOWNLOAD_BYTES {
             return Err(format!(
                 "download video: {} bytes exceeds cap {MAX_VIDEO_DOWNLOAD_BYTES}",
                 data.len()
             ));
         }
-        std::fs::write(&part_path, &data).map_err(|e| e.to_string())?;
+        tokio::fs::write(&part_path, &data)
+            .await
+            .map_err(|e| e.to_string())?;
     }
 
-    if let Err(err) = std::fs::rename(&part_path, &fp) {
-        let _ = std::fs::remove_file(&part_path);
-        return Err(err.to_string());
-    }
     // The bytes on disk stay exactly as downloaded — encrypted when the
     // source is CENC (P1-7). The key sidecar is what lets the serve path
     // decrypt ranges on demand, now and in later processes; if it cannot be
     // written the entry would be undecodable, so fail the download instead
     // of leaving a dead cache file behind.
-    if !content_key.is_empty() && cache_cenc_state(&fp) == CacheCencState::Encrypted {
-        if let Err(err) = write_key_sidecar(&fp, content_key) {
-            let _ = std::fs::remove_file(&fp);
-            return Err(err);
+    let key_path = fp.clone();
+    let key = content_key.to_vec();
+    tokio::task::spawn_blocking(move || {
+        // Finalization owns both guards even if the request is cancelled.
+        let _guard = guard;
+        let _download_slot = download_slot;
+        if let Err(err) = std::fs::rename(&part_path, &key_path) {
+            let _ = std::fs::remove_file(&part_path);
+            return Err(err.to_string());
         }
-    }
-    prune_src_cache(&src_dir, &fp);
+        if !key.is_empty() && cache_cenc_state(&key_path) == CacheCencState::Encrypted {
+            if let Err(err) = write_key_sidecar(&key_path, &key) {
+                let _ = std::fs::remove_file(&key_path);
+                return Err(err);
+            }
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    // Eviction walks the whole cache directory, so it must not run on the
+    // request path; schedule it instead of awaiting it.
+    schedule_prune_src_cache(&src_dir, fp);
 
     Ok(format!("/src/{filename}"))
 }
@@ -1369,15 +1501,41 @@ struct CacheEntry {
     when: std::time::SystemTime,
 }
 
+/// Serializes background prune passes: at most one runs at a time, and a
+/// request that arrives while one is running does not queue another.
+static PRUNE_LOCK: Lazy<tokio::sync::Mutex<()>> = Lazy::new(|| tokio::sync::Mutex::new(()));
+
+/// Requests a cache-eviction pass off the request path.
+///
+/// The pass walks the whole `src_dir` and stats every candidate, so it must
+/// not run on an async worker or hold up the response; it is spawned and
+/// never awaited. At most one pass runs at a time; a request that arrives
+/// while a pass is in flight is skipped (the next download schedules again).
+pub(crate) fn schedule_prune_src_cache(src_dir: &str, keep: PathBuf) {
+    schedule_prune_src_cache_with_budget(src_dir, keep, MAX_VIDEO_CACHE_BYTES);
+}
+
+fn schedule_prune_src_cache_with_budget(src_dir: &str, keep: PathBuf, max_bytes: i64) {
+    let src_dir = src_dir.to_string();
+    tokio::spawn(async move {
+        let Ok(_guard) = PRUNE_LOCK.try_lock() else {
+            return;
+        };
+        let outcome = tokio::task::spawn_blocking(move || {
+            prune_src_cache_with_budget(&src_dir, &keep, max_bytes)
+        })
+        .await;
+        if let Err(err) = outcome {
+            log::warn!("cache prune task failed: {err}");
+        }
+    });
+}
+
 /// Removes the oldest completed cached files once the cache exceeds the
 /// limit. Videos and manga images share `src_dir`, so both count toward the
 /// same budget: manga images are the content-addressed `img_<sha256>.<ext>`
 /// files, and they are evictable like videos (re-downloadable on demand).
 /// In-flight downloads (`.part` / `.tmp`) are never counted or deleted.
-pub(crate) fn prune_src_cache(src_dir: &str, keep: &Path) {
-    prune_src_cache_with_budget(src_dir, keep, MAX_VIDEO_CACHE_BYTES);
-}
-
 fn prune_src_cache_with_budget(src_dir: &str, keep: &Path, max_bytes: i64) {
     let Ok(entries) = std::fs::read_dir(src_dir) else {
         return;
@@ -1397,7 +1555,14 @@ fn prune_src_cache_with_budget(src_dir: &str, keep: &Path, max_bytes: i64) {
     for (name, path) in &entries {
         if let Some(stem) = name.strip_suffix(".key") {
             if !names.contains(stem) && !names.contains(format!("{stem}.part").as_str()) {
-                let _ = std::fs::remove_file(path);
+                let video = Path::new(src_dir).join(stem);
+                let Ok(_guard) = cache_entry_lock(&video).try_lock_owned() else {
+                    continue;
+                };
+                // The directory snapshot may predate another download's commit.
+                if !video.exists() && !Path::new(src_dir).join(format!("{stem}.part")).exists() {
+                    let _ = std::fs::remove_file(path);
+                }
             }
         }
     }
@@ -1446,6 +1611,9 @@ fn prune_src_cache_with_budget(src_dir: &str, keep: &Path, max_bytes: i64) {
         if item.path.as_path() == keep {
             continue;
         }
+        let Ok(_guard) = cache_entry_lock(&item.path).try_lock_owned() else {
+            continue;
+        };
         if std::fs::remove_file(&item.path).is_ok() {
             // A video's key sidecar (P1-7) is part of the entry, not a
             // separate cache citizen.
@@ -2414,820 +2582,10 @@ pub fn register(s: &mut Server) {
 }
 
 #[cfg(test)]
-mod spade_vectors {
-    //! Key and URL golden vectors. They are expectations produced by an
-    //! independent reference implementation, not by this crate.
-
-    use super::*;
-    use serde_json::json;
-
-    fn expect_source(resolution: VideoSourceResolution) -> (String, Vec<u8>) {
-        match resolution {
-            VideoSourceResolution::Found(url, key) => (url, key),
-            other => panic!("expected a playable source, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn derives_the_short_drama_content_key() {
-        let key = derive_spade_content_key("kbwf80+1N+V9nwHQSp431GWvLeBlqizTYJ0o5FOrHuZhqimysg==");
-        assert_eq!(hex::encode(key), "4990a92de837e29e18031a370ab744e6");
-    }
-
-    #[test]
-    fn reads_the_embedded_video_model_string() {
-        let raw = serde_json::to_vec(&json!({
-            "data": { "vid1": { "video_model":
-                r#"{"video_list":[{"main_url":"https://example.test/low.mp4"},{"main_url":"https://example.test/high.mp4"}]}"#
-            } }
-        }))
-        .unwrap();
-        assert_eq!(
-            expect_source(extract_video_url(&raw)).0,
-            "https://example.test/high.mp4"
-        );
-    }
-
-    #[test]
-    fn reads_the_shortplay_shape_and_its_key() {
-        let model = json!({
-            "key_seed": "e/sKbv4roNA/4Xm/6oFbFjBm6AIBteh9Z0EddXTl7yI=",
-            "video_list": {
-                "video_1": {
-                    "definition": "360p",
-                    "main_url": base64::engine::general_purpose::STANDARD
-                        .encode("https://v26-reading-video.fqnovelvod.com/example.mp4"),
-                    "spade_a": "orws8mOJLdlTlhnvZZQr32GULuhXkBvtUpAf7GWQKNtUohyPjw=="
-                }
-            }
-        });
-        let map = model.as_object().unwrap();
-        let (url, key) = expect_source(extract_shortplay_video_model_source(map));
-        assert_eq!(url, "https://v26-reading-video.fqnovelvod.com/example.mp4");
-        assert_eq!(key.len(), 16);
-    }
-
-    #[test]
-    fn fallback_source_prefers_the_highest_quality_and_keeps_its_key() {
-        let root = json!({
-            "video_info": { "data": {
-                "key_seed": "AAAA",
-                "video_list": {
-                    "video_1": {
-                        "main_url": "https://example.test/low.mp4",
-                        "vwidth": 720, "vheight": 1280
-                    },
-                    "video_5": {
-                        "main_url": "https://example.test/high.mp4",
-                        "vwidth": 1080, "vheight": 1920,
-                        "spade_a": "kbwf80+1N+V9nwHQSp431GWvLeBlqizTYJ0o5FOrHuZhqimysg=="
-                    }
-                }
-            } }
-        });
-        let map = root.as_object().unwrap();
-        let (url, key) = expect_source(extract_fallback_video_source(map));
-        assert_eq!(url, "https://example.test/high.mp4");
-        assert_eq!(hex::encode(key), "4990a92de837e29e18031a370ab744e6");
-    }
-
-    #[test]
-    fn fallback_source_skips_bytevc2_even_when_it_scores_highest() {
-        let root = json!({
-            "video_info": { "data": {
-                "key_seed": "AAAA",
-                "video_list": {
-                    "video_5": {
-                        "main_url": "https://example.test/vvc.mp4",
-                        "vwidth": 1080, "vheight": 1920,
-                        "codec_type": "bytevc2"
-                    },
-                    "video_1": {
-                        "main_url": "https://example.test/h264.mp4",
-                        "vwidth": 720, "vheight": 1280,
-                        "codec_type": "h264"
-                    }
-                }
-            } }
-        });
-        let map = root.as_object().unwrap();
-        let (url, _) = expect_source(extract_fallback_video_source(map));
-        assert_eq!(url, "https://example.test/h264.mp4");
-    }
-
-    #[test]
-    fn fallback_source_never_serves_a_bytevc2_only_list() {
-        let root = json!({
-            "video_info": { "data": {
-                "key_seed": "AAAA",
-                "video_list": {
-                    "video_5": {
-                        "main_url": "https://example.test/vvc.mp4",
-                        "vwidth": 1080, "vheight": 1920,
-                        "gear_des_key": "bytevc2_1080p"
-                    }
-                }
-            } }
-        });
-        let map = root.as_object().unwrap();
-        assert_eq!(
-            extract_fallback_video_source(map),
-            VideoSourceResolution::CodecRejected
-        );
-    }
-
-    #[test]
-    fn variant_display_name_follows_the_short_edge_mapping() {
-        assert_eq!(variant_display_name(360), "360P");
-        assert_eq!(variant_display_name(480), "480P");
-        assert_eq!(variant_display_name(540), "540P");
-        assert_eq!(variant_display_name(720), "720P");
-        assert_eq!(variant_display_name(1080), "1080P");
-        assert_eq!(variant_display_name(1440), "2K");
-        assert_eq!(variant_display_name(2160), "4K");
-        assert_eq!(variant_display_name(0), "");
-    }
-
-    #[test]
-    fn variant_rows_skip_bytevc2_and_sort_by_the_short_edge() {
-        // 竖屏漫剧（series 7686494169098898456 实测形状）：video_list 是
-        // object，vheight 是长边——档位名必须取短边，bytevc2 档被排除。
-        let video_list = json!({
-            "video_4": {
-                "main_url": "https://example.test/a.mp4",
-                "vwidth": 720, "vheight": 1280, "codec_type": "bytevc2"
-            },
-            "video_3": {
-                "main_url": "https://example.test/720.mp4",
-                "vwidth": 720, "vheight": 1280, "codec_type": "h264",
-                "spade_a": "orws8mOJLdlTlhnvZZQr32GULuhXkBvtUpAf7GWQKNtUohyPjw=="
-            },
-            "video_2": {
-                "main_url": "https://example.test/540.mp4",
-                "vwidth": 540, "vheight": 960, "codec_type": "h264",
-                "spade_a": "orws8mOJLdlTlhnvZZQr32GULuhXkBvtUpAf7GWQKNtUohyPjw=="
-            },
-            "video_1": {
-                "main_url": "https://example.test/360.mp4",
-                "vwidth": 360, "vheight": 640, "codec_type": "h264",
-                "spade_a": "orws8mOJLdlTlhnvZZQr32GULuhXkBvtUpAf7GWQKNtUohyPjw=="
-            }
-        });
-        let rows = merge_variant_rows(variant_rows_scored(
-            video_list.as_object(),
-            Some(b"AAAA".to_vec()),
-        ));
-        let names: Vec<&str> = rows.iter().map(|v| v["name"].as_str().unwrap()).collect();
-        assert_eq!(names, ["720P", "540P", "360P"]);
-        for row in &rows {
-            assert!(row["url"].as_str().unwrap().starts_with("https://"));
-            assert_eq!(row["key_hex"].as_str().unwrap().len(), 32);
-        }
-    }
-
-    #[test]
-    fn fallback_source_prefers_h264_on_equal_quality() {
-        let root = json!({
-            "video_info": { "data": {
-                "key_seed": "AAAA",
-                "video_list": {
-                    "video_1": {
-                        "main_url": "https://example.test/h265.mp4",
-                        "vwidth": 1080, "vheight": 1920,
-                        "bitrate": 2000000,
-                        "codec_type": "h265"
-                    },
-                    "video_2": {
-                        "main_url": "https://example.test/h264.mp4",
-                        "vwidth": 1080, "vheight": 1920,
-                        "bitrate": 2000000,
-                        "codec_type": "h264"
-                    }
-                }
-            } }
-        });
-        let map = root.as_object().unwrap();
-        let (url, _) = expect_source(extract_fallback_video_source(map));
-        assert_eq!(url, "https://example.test/h264.mp4");
-    }
-}
-
+mod cenc_sample_fixture;
 #[cfg(test)]
-mod cenc_sample_fixture {
-    //! Offline contract for CENC sample decryption (video.rs).
-    //!
-    //! The MP4 comes from the offline fixture generator: a minimal
-    //! `moov/trak/mdia/minf/stbl` with `stsd(encv)`, `stsz`, `stsc`, `stco`,
-    //! `senc` and `tenc`, plus an encrypted `mdat`. It was encrypted by an
-    //! independent AES-CTR implementation and stored the plaintext samples, so
-    //! this test compares the decryption against data the Rust side never
-    //! produced.
-
-    use super::*;
-
-    const FIXTURE: &str = include_str!("../../testdata/cenc_sample_fixture.json");
-
-    fn fixture() -> serde_json::Value {
-        serde_json::from_str(FIXTURE).expect("cenc_sample_fixture.json")
-    }
-
-    fn b64(f: &serde_json::Value, key: &str) -> Vec<u8> {
-        base64::engine::general_purpose::STANDARD
-            .decode(f[key].as_str().expect(key))
-            .expect("base64 fixture")
-    }
-
-    fn plain_samples(f: &serde_json::Value, key: &str) -> Vec<Vec<u8>> {
-        f[key]
-            .as_array()
-            .expect(key)
-            .iter()
-            .map(|v| {
-                base64::engine::general_purpose::STANDARD
-                    .decode(v.as_str().expect("sample"))
-                    .expect("base64 sample")
-            })
-            .collect()
-    }
-
-    /// The encrypted `mdat` starts at the offset the generator reported for
-    /// that case (the two cases have different moov sizes).
-    fn encrypted_region(file: &[u8], f: &serde_json::Value, key: &str) -> Vec<u8> {
-        let off = f[key].as_u64().expect(key) as usize;
-        file[off..].to_vec()
-    }
-
-    #[test]
-    fn detects_encrypted_tracks_and_rewrites_the_sample_entry() {
-        let f = fixture();
-        let c = &f["cenc"];
-        let mut file = b64(c, "full_sample_b64");
-        assert!(mp4_needs_cenc_decrypt(&file), "encv must be detected");
-
-        let key = hex::decode(c["key_hex"].as_str().unwrap()).unwrap();
-        decrypt_cenc_mp4(&mut file, &key).expect("decrypt");
-
-        // encv -> hvc1 and sinf -> free, so a re-run must no longer see it as
-        // encrypted (that is what makes the call idempotent).
-        assert!(
-            !mp4_needs_cenc_decrypt(&file),
-            "the sample entry must be rewritten to a clear one"
-        );
-    }
-
-    #[test]
-    fn decrypts_every_whole_encrypted_sample_with_the_go_plaintext() {
-        let f = fixture();
-        let c = &f["cenc"];
-        let mut file = b64(c, "full_sample_b64");
-        let expected = plain_samples(c, "full_sample_plain_b64");
-        let key = hex::decode(c["key_hex"].as_str().unwrap()).unwrap();
-
-        // The samples are laid out contiguously in mdat, in stsz order.
-        let before = encrypted_region(&file, c, "full_mdat_offset");
-        decrypt_cenc_mp4(&mut file, &key).expect("decrypt");
-        let after = encrypted_region(&file, c, "full_mdat_offset");
-
-        let mut cursor = 0usize;
-        for (i, want) in expected.iter().enumerate() {
-            let got = &after[cursor..cursor + want.len()];
-            assert_eq!(got, want.as_slice(), "sample {i}");
-            // Go's ciphertext must differ from the plaintext for a non-trivial
-            // sample, otherwise the comparison proves nothing.
-            assert_ne!(
-                &before[cursor..cursor + want.len()],
-                want.as_slice(),
-                "sample {i} was not actually encrypted"
-            );
-            cursor += want.len();
-        }
-        assert_eq!(cursor, after.len(), "all samples covered");
-    }
-
-    #[test]
-    fn decrypts_subsample_encrypted_payloads_and_keeps_the_clear_header() {
-        let f = fixture();
-        let c = &f["cenc"];
-        let mut file = b64(c, "subsample_b64");
-        let expected = plain_samples(c, "subsample_plain_b64");
-        let clear_head = c["subsample_clear_head"].as_u64().unwrap() as usize;
-        let key = hex::decode(c["key_hex"].as_str().unwrap()).unwrap();
-
-        decrypt_cenc_mp4(&mut file, &key).expect("decrypt");
-        let after = encrypted_region(&file, c, "subsample_mdat_offset");
-
-        let mut cursor = 0usize;
-        for (i, want) in expected.iter().enumerate() {
-            let got = &after[cursor..cursor + want.len()];
-            assert_eq!(got, want.as_slice(), "sample {i}");
-            // senc flags=2 marks the head as clear: it must survive untouched.
-            assert_eq!(
-                &got[..clear_head],
-                &want[..clear_head],
-                "sample {i} clear head"
-            );
-            cursor += want.len();
-        }
-    }
-
-    #[test]
-    fn a_wrong_key_produces_different_bytes_and_a_bad_length_is_rejected() {
-        let f = fixture();
-        let c = &f["cenc"];
-        let mut file = b64(c, "full_sample_b64");
-        let original = file.clone();
-        let expected = plain_samples(c, "full_sample_plain_b64");
-
-        assert!(decrypt_cenc_mp4(&mut file.clone(), &[0u8; 7]).is_err());
-        decrypt_cenc_mp4(&mut file, &[0xAAu8; 16]).expect("wrong key still decrypts");
-        let after = encrypted_region(&file, c, "full_mdat_offset");
-        assert_ne!(
-            &after[..expected[0].len()],
-            expected[0].as_slice(),
-            "a wrong key must not reproduce the Go plaintext"
-        );
-        assert_ne!(file, original, "the wrong key must have changed the bytes");
-    }
-
-    /// P1-7: the cache file now stays encrypted on disk and the decrypted
-    /// view is produced per served range. Applying the index range by range
-    /// — unaligned probes, block-straddling slices, and a sequential
-    /// small-chunk pass like the streaming body's — must reproduce the
-    /// whole-file decrypt byte for byte.
-    #[test]
-    fn served_ranges_match_the_whole_file_decrypt() {
-        let f = fixture();
-        let c = &f["cenc"];
-        let key = hex::decode(c["key_hex"].as_str().unwrap()).unwrap();
-        for case in ["full_sample_b64", "subsample_b64"] {
-            let encrypted = b64(c, case);
-            let mut whole = encrypted.clone();
-            decrypt_cenc_mp4(&mut whole, &key).expect("whole decrypt");
-            assert_ne!(whole, encrypted, "{case} must actually be encrypted");
-
-            let index = build_cenc_index(&encrypted, 0, encrypted.len() as u64)
-                .expect("index build")
-                .expect("encrypted fixture must produce an index");
-            let mut probes: Vec<(usize, usize)> = vec![(0, encrypted.len()), (0, 28)];
-            let mut off = 0;
-            while off < encrypted.len() {
-                probes.push((off, (encrypted.len() - off).min(37)));
-                off += 37;
-            }
-            for (off, len) in probes {
-                let mut buf = encrypted[off..off + len].to_vec();
-                apply_cenc_index(&mut buf, off as u64, &index, &key).expect("apply");
-                assert_eq!(buf, whole[off..off + len], "{case} range {off}+{len}");
-            }
-            let mut streamed = Vec::with_capacity(encrypted.len());
-            let mut pos = 0usize;
-            while pos < encrypted.len() {
-                let take = (encrypted.len() - pos).min(7);
-                let mut buf = encrypted[pos..pos + take].to_vec();
-                apply_cenc_index(&mut buf, pos as u64, &index, &key).expect("chunk apply");
-                streamed.extend_from_slice(&buf);
-                pos += take;
-            }
-            assert_eq!(streamed, whole, "{case} chunked stream");
-        }
-    }
-
-    fn p17_temp_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "fqapp-p17-{tag}-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        dir
-    }
-
-    /// The serve path builds its index from the moov box alone; that index
-    /// must agree with the one built from the whole file.
-    #[test]
-    fn index_from_moov_slice_matches_whole_file_index() {
-        let f = fixture();
-        let c = &f["cenc"];
-        let encrypted = b64(c, "full_sample_b64");
-        let dir = p17_temp_dir("moov");
-        let path = dir.join("sample.mp4");
-        std::fs::write(&path, &encrypted).expect("write fixture");
-
-        let (moov_off, moov) = read_moov_bytes(&path).expect("moov must be readable");
-        assert_eq!(moov_off, 28, "fixture moov offset");
-        let from_moov = build_cenc_index(&moov, moov_off, encrypted.len() as u64)
-            .expect("build from moov")
-            .expect("index from moov");
-        let from_file = build_cenc_index(&encrypted, 0, encrypted.len() as u64)
-            .expect("build from file")
-            .expect("index from file");
-        assert_eq!(from_moov.patches.len(), from_file.patches.len());
-        for (a, b) in from_moov.patches.iter().zip(&from_file.patches) {
-            assert_eq!((a.off, &a.bytes), (b.off, &b.bytes), "patch");
-        }
-        assert_eq!(from_moov.ranges.len(), from_file.ranges.len());
-        for (a, b) in from_moov.ranges.iter().zip(&from_file.ranges) {
-            assert_eq!(
-                (a.off, a.size, a.base, a.counter0),
-                (b.off, b.size, b.base, b.counter0),
-                "range"
-            );
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Cache state detection and the key sidecar roundtrip the serve path
-    /// depends on: encrypted stays detectable, a decrypted copy reads as
-    /// clear, garbage is unknown (and therefore never deleted blindly).
-    #[test]
-    fn cache_state_detection_and_sidecar_roundtrip() {
-        let f = fixture();
-        let c = &f["cenc"];
-        let encrypted = b64(c, "full_sample_b64");
-        let key = hex::decode(c["key_hex"].as_str().unwrap()).unwrap();
-        let mut plaintext = encrypted.clone();
-        decrypt_cenc_mp4(&mut plaintext, &key).expect("decrypt");
-
-        let dir = p17_temp_dir("state");
-        let enc_path = dir.join("enc.mp4");
-        std::fs::write(&enc_path, &encrypted).expect("write encrypted");
-        assert_eq!(cache_cenc_state(&enc_path), CacheCencState::Encrypted);
-        assert!(read_key_sidecar(&enc_path).is_none());
-        write_key_sidecar(&enc_path, &key).expect("write sidecar");
-        assert_eq!(
-            read_key_sidecar(&enc_path).expect("sidecar"),
-            key,
-            "sidecar must roundtrip the content key"
-        );
-
-        let plain_path = dir.join("plain.mp4");
-        std::fs::write(&plain_path, &plaintext).expect("write plaintext");
-        assert_eq!(cache_cenc_state(&plain_path), CacheCencState::Clear);
-
-        let junk_path = dir.join("junk.mp4");
-        std::fs::write(&junk_path, b"not an mp4 at all").expect("write junk");
-        assert_eq!(cache_cenc_state(&junk_path), CacheCencState::Unknown);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The one-time migration (user decision 2026-10-25): plaintext cache
-    /// files from the old in-place decrypt are removed on first run;
-    /// encrypted entries, unparseable files and non-video files stay; the
-    /// marker makes later runs no-ops except for pending retries, which
-    /// re-test the file before deleting anything.
-    #[test]
-    fn migration_removes_plaintext_and_keeps_the_rest() {
-        let f = fixture();
-        let c = &f["cenc"];
-        let encrypted = b64(c, "full_sample_b64");
-        let key = hex::decode(c["key_hex"].as_str().unwrap()).unwrap();
-        let mut plaintext = encrypted.clone();
-        decrypt_cenc_mp4(&mut plaintext, &key).expect("decrypt");
-
-        let dir = p17_temp_dir("migration");
-        std::fs::write(dir.join("enc.mp4"), &encrypted).expect("enc");
-        std::fs::write(dir.join("plain.mp4"), &plaintext).expect("plain");
-        std::fs::write(dir.join("plain.mp4.key"), b"deadbeef").expect("plain sidecar");
-        std::fs::write(dir.join("junk.mp4"), b"not an mp4").expect("junk");
-        std::fs::write(dir.join("note.txt"), &plaintext).expect("note");
-        std::fs::write(dir.join("clip.ts"), &plaintext).expect("ts");
-
-        migrate_plaintext_video_cache(&dir);
-        assert!(!dir.join("plain.mp4").exists(), "plaintext cache removed");
-        assert!(
-            !dir.join("plain.mp4.key").exists(),
-            "its sidecar goes with it"
-        );
-        assert!(dir.join("enc.mp4").exists(), "encrypted cache kept");
-        assert!(dir.join("junk.mp4").exists(), "unparseable file kept");
-        assert!(dir.join("note.txt").exists(), "non-video file kept");
-        assert!(
-            dir.join("clip.ts").exists(),
-            ".ts never went through the MP4 decrypt"
-        );
-        assert!(dir.join(CACHE_FORMAT_MARKER).exists(), "marker written");
-
-        // Second run is a no-op.
-        migrate_plaintext_video_cache(&dir);
-        assert!(dir.join("enc.mp4").exists());
-
-        // A pending retry removes a plaintext file that shows up later…
-        std::fs::write(dir.join("late.mp4"), &plaintext).expect("late");
-        std::fs::write(dir.join(CACHE_FORMAT_PENDING), b"late.mp4\n").expect("pending");
-        migrate_plaintext_video_cache(&dir);
-        assert!(!dir.join("late.mp4").exists(), "pending plaintext removed");
-        assert!(
-            !dir.join(CACHE_FORMAT_PENDING).exists(),
-            "pending list cleared once empty"
-        );
-
-        // …but re-tests first: a name since reused by an encrypted entry is
-        // kept, not deleted.
-        std::fs::write(dir.join("reused.mp4"), &encrypted).expect("reused");
-        std::fs::write(dir.join(CACHE_FORMAT_PENDING), b"reused.mp4\n").expect("pending");
-        migrate_plaintext_video_cache(&dir);
-        assert!(
-            dir.join("reused.mp4").exists(),
-            "reused encrypted name kept"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// P0-1: the fixed-size `stsz` branch used to allocate one `usize` per
-    /// declared sample with no bound, so a box claiming billions of samples
-    /// could OOM the process from 8 header bytes. It must reject counts
-    /// whose samples cannot fit in the file, while still accepting sane
-    /// fixed-size boxes.
-    #[test]
-    fn stsz_fixed_size_branch_rejects_absurd_sample_count() {
-        fn stsz_box(sample_size: u32, sample_count: u32, file_len: usize) -> (Vec<u8>, Mp4Box) {
-            let mut data = vec![0u8; file_len.max(20)];
-            data[12..16].copy_from_slice(&sample_size.to_be_bytes());
-            data[16..20].copy_from_slice(&sample_count.to_be_bytes());
-            (
-                data,
-                Mp4Box {
-                    off: 0,
-                    size: 20,
-                    header: 8,
-                    typ: *b"stsz",
-                },
-            )
-        }
-
-        // Absurd count: would previously allocate ~32 GiB of `usize`s.
-        let (data, b) = stsz_box(1024, u32::MAX, 20);
-        assert!(
-            parse_stsz(&data, b).is_empty(),
-            "sample_count whose samples cannot fit in the file must be rejected"
-        );
-        // Count above the absolute cap, even with 1-byte samples.
-        let (data, b) = stsz_box(1, MAX_STSZ_SAMPLES as u32 + 1, 20);
-        assert!(
-            parse_stsz(&data, b).is_empty(),
-            "sample_count above MAX_STSZ_SAMPLES must be rejected"
-        );
-        // Product overflow: 2 * u32::MAX samples of u32::MAX bytes.
-        let (data, b) = stsz_box(u32::MAX, 2, 20);
-        assert!(
-            parse_stsz(&data, b).is_empty(),
-            "overflowing sample_count * sample_size must be rejected"
-        );
-        // Sane fixed-size box still parses.
-        let (data, b) = stsz_box(100, 3, 320);
-        assert_eq!(parse_stsz(&data, b), vec![100, 100, 100]);
-    }
-
-    /// P1-6: manga images (`img_*`) must count toward the same `src_dir`
-    /// budget as videos and be evicted oldest-first; in-flight and
-    /// unrelated files must never be deleted.
-    #[test]
-    fn src_cache_prune_evicts_oldest_manga_images_too() {
-        let dir = std::env::temp_dir().join(format!(
-            "fqapp-prune-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::create_dir_all(&dir);
-        let write_at = |name: &str, size: usize, secs: u64| {
-            let path = dir.join(name);
-            std::fs::write(&path, vec![b'x'; size]).expect("write cache file");
-            std::fs::File::options()
-                .write(true)
-                .open(&path)
-                .expect("open cache file")
-                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
-                .expect("set mtime");
-            path
-        };
-        let old_video = write_at("old.mp4", 60, 50);
-        let old_image = write_at("img_old.png", 60, 100);
-        let new_image = write_at("img_new.png", 60, 200);
-        let in_flight = write_at("img_tmp.png.part", 60, 10);
-        let unrelated = write_at("notes.txt", 60, 10);
-
-        // Total counted = 180 (video + 2 images); budget 100 forces eviction
-        // of the oldest first: old video, then old image. The kept (newest)
-        // image, the in-flight part file, and the unrelated file survive.
-        prune_src_cache_with_budget(&dir.to_string_lossy(), &new_image, 100);
-
-        assert!(!old_video.exists(), "oldest video must be evicted");
-        assert!(!old_image.exists(), "oldest manga image must be evicted");
-        assert!(new_image.exists(), "kept image must survive");
-        assert!(in_flight.exists(), "in-flight .part must never be deleted");
-        assert!(unrelated.exists(), "unrelated files must never be deleted");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// P1-9: the download must stream chunk by chunk (never hold the whole
-    /// file in memory) and enforce the per-file cap, both from an
-    /// advertised `Content-Length` and from the running byte count.
-    /// A local TCP server stands in for the upstream host.
-    async fn serve_once(
-        body: Vec<u8>,
-        advertised: Option<u64>,
-    ) -> (u16, tokio::task::JoinHandle<()>) {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind test server");
-        let port = listener.local_addr().expect("test server addr").port();
-        let handle = tokio::spawn(async move {
-            if let Ok((mut socket, _)) = listener.accept().await {
-                let mut buf = [0u8; 4096];
-                let _ = socket.read(&mut buf).await;
-                let header = match advertised {
-                    Some(len) => format!(
-                        "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {len}\r\n\r\n"
-                    ),
-                    None => "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_string(),
-                };
-                let _ = socket.write_all(header.as_bytes()).await;
-                let _ = socket.write_all(&body).await;
-                let _ = socket.shutdown().await;
-            }
-        });
-        (port, handle)
-    }
-
-    fn ensure_test_crypto_provider() {
-        // The streaming client is built with rustls-no-provider, so it
-        // needs the process-wide default provider the upstream transport
-        // normally installs at startup. Mirror `upstream/http.rs`.
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    }
-
-    #[tokio::test]
-    async fn stream_download_writes_body_without_whole_file_buffer() {
-        ensure_test_crypto_provider();
-        let body: Vec<u8> = (0..10_000u32).map(|i| (i % 251) as u8).collect();
-        let (port, server) = serve_once(body.clone(), Some(body.len() as u64)).await;
-        let dir = std::env::temp_dir().join(format!(
-            "fqapp-stream-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::create_dir_all(&dir);
-        let part = dir.join("ep.mp4.part");
-        let url = format!("http://127.0.0.1:{port}/ep.mp4");
-        let total = stream_download_to_file(&url, UA_WINDOWS_BROWSER, &part)
-            .await
-            .expect("stream download");
-        assert_eq!(total, body.len() as u64);
-        assert_eq!(std::fs::read(&part).expect("read part"), body);
-        let _ = server.await;
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn stream_download_rejects_lying_content_length() {
-        ensure_test_crypto_provider();
-        let body = vec![b'x'; 64];
-        let (port, server) = serve_once(body, Some(MAX_VIDEO_DOWNLOAD_BYTES + 1)).await;
-        let dir = std::env::temp_dir().join(format!(
-            "fqapp-stream-cap-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::create_dir_all(&dir);
-        let part = dir.join("ep.mp4.part");
-        let url = format!("http://127.0.0.1:{port}/ep.mp4");
-        let err = stream_download_to_file(&url, UA_WINDOWS_BROWSER, &part)
-            .await
-            .expect_err("lying Content-Length must be rejected");
-        assert!(err.contains("content-length"), "unexpected error: {err}");
-        assert!(
-            !part.exists(),
-            "no file must be created on precheck failure"
-        );
-        let _ = server.await;
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn stream_download_enforces_cap_from_running_total() {
-        ensure_test_crypto_provider();
-        // No advertised length: the running byte count must stop the
-        // download. A small cap keeps the test fast.
-        let body = vec![b'y'; 100];
-        let (port, server) = serve_once(body, None).await;
-        let dir = std::env::temp_dir().join(format!(
-            "fqapp-stream-total-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::create_dir_all(&dir);
-        let part = dir.join("ep.mp4.part");
-        let url = format!("http://127.0.0.1:{port}/ep.mp4");
-        // Exercise the same loop with a small cap via the test-only seam.
-        let err = stream_download_to_file_with_cap(&url, UA_WINDOWS_BROWSER, &part, 10)
-            .await
-            .expect_err("stream past the cap must be rejected");
-        assert!(err.contains("exceeds cap"), "unexpected error: {err}");
-        let _ = server.await;
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn merge_variant_rows_keeps_the_fallback_only_top_tier() {
-        // 实测形状（2026-10-12）：主列表到 720P 为止，fallback 列表多一个
-        // 1080p。合并后 1080P 必须在列表里，且同档不重复。
-        const SPADE: &str = "orws8mOJLdlTlhnvZZQr32GULuhXkBvtUpAf7GWQKNtUohyPjw==";
-        let primary = json!({
-            "video_1": { "main_url": "https://example.test/360.mp4", "vwidth": 360, "vheight": 640,
-                "codec_type": "bytevc1", "spade_a": SPADE },
-            "video_2": { "main_url": "https://example.test/720.mp4", "vwidth": 720, "vheight": 1280,
-                "codec_type": "bytevc1", "spade_a": SPADE }
-        });
-        let fallback = json!({
-            "video_1": { "main_url": "https://example.test/720.mp4", "vwidth": 720, "vheight": 1280,
-                "codec_type": "bytevc1", "spade_a": SPADE },
-            "video_2": { "main_url": "https://example.test/1080.mp4", "vwidth": 1080, "vheight": 1920,
-                "codec_type": "bytevc1", "spade_a": SPADE }
-        });
-        let mut scored = variant_rows_scored(primary.as_object(), Some(b"AAAA".to_vec()));
-        scored.extend(variant_rows_scored(
-            fallback.as_object(),
-            Some(b"AAAA".to_vec()),
-        ));
-        let rows = merge_variant_rows(scored);
-        let names: Vec<&str> = rows.iter().map(|v| v["name"].as_str().unwrap()).collect();
-        assert_eq!(
-            names,
-            ["1080P", "720P", "360P"],
-            "fallback-only tier must be merged in and duplicates collapsed"
-        );
-        for row in &rows {
-            assert_eq!(row["key_hex"].as_str().unwrap().len(), 32);
-        }
-    }
-
-    #[test]
-    fn merge_variant_rows_still_drops_bytevc2_from_the_fallback_list() {
-        // fallback 列表里 1080p 常是 bytevc1、低档是 bytevc2（实测 4/6 部剧）。
-        // 合并不得把 bytevc2 带进面板。
-        const SPADE: &str = "orws8mOJLdlTlhnvZZQr32GULuhXkBvtUpAf7GWQKNtUohyPjw==";
-        let fallback = json!({
-            "video_1": { "main_url": "https://example.test/1080-vvc.mp4", "vwidth": 1080, "vheight": 1920,
-                "codec_type": "bytevc2", "spade_a": SPADE },
-            "video_2": { "main_url": "https://example.test/1080-hvc1.mp4", "vwidth": 1080, "vheight": 1920,
-                "codec_type": "bytevc1", "spade_a": SPADE },
-            "video_3": { "main_url": "https://example.test/720-vvc.mp4", "vwidth": 720, "vheight": 1280,
-                "codec_type": "bytevc2", "spade_a": SPADE }
-        });
-        let rows = merge_variant_rows(variant_rows_scored(
-            fallback.as_object(),
-            Some(b"AAAA".to_vec()),
-        ));
-        let names: Vec<&str> = rows.iter().map(|v| v["name"].as_str().unwrap()).collect();
-        assert_eq!(names, ["1080P"], "bytevc2 rows must never reach the panel");
-    }
-}
-
+mod spade_vectors;
 #[cfg(test)]
-mod variant_url_shapes {
-    //! `main_url` 有两种形态，混淆它们会让 fallback 列表（含 1080p）整片解不出来。
-    //! 实例见 .agents/notes/implemented/bug-fix/2026-10-12-short-drama-1080p-variant-merge.md
-
-    use super::*;
-    use serde_json::json;
-
-    fn entry(main_url: String) -> Map<String, Value> {
-        json!({
-            "main_url": main_url,
-            "spade_a": "orws8mOJLdlTlhnvZZQr32GULuhXkBvtUpAf7GWQKNtUohyPjw==",
-        })
-        .as_object()
-        .unwrap()
-        .clone()
-    }
-
-    #[test]
-    fn spade_encrypted_main_url_reaches_the_decryptor_intact() {
-        // spade 密文：base64 解出来以 a8 00 01 00 开头。旧实现无条件先解一层
-        // base64 再交给 decrypt_spade_url，密文被毁成不可再解的字节串——面板
-        // 会拿到一个不是 URL 的垃圾串（实测就是 1080P 那一档）。
-        let mut blob = vec![0xa8u8, 0x00, 0x01, 0x00];
-        blob.extend(0u8..32);
-        let main_url = base64::engine::general_purpose::STANDARD.encode(&blob);
-        let seed = b"AAAA".to_vec();
-
-        let (url, _) = decrypt_variant_entry(&entry(main_url.clone()), Some(&seed)).unwrap();
-        assert_eq!(
-            url,
-            decrypt_spade_url(&main_url, &seed),
-            "spade ciphertext must not be pre-decoded before decrypt_spade_url"
-        );
-    }
-
-    #[test]
-    fn base64_wrapped_plain_url_still_decodes() {
-        // 明文地址：base64 解出来直接以 http 开头，必须照旧解出来。
-        let main_url =
-            base64::engine::general_purpose::STANDARD.encode(b"https://example.test/1080.mp4");
-        let (url, key) = decrypt_variant_entry(&entry(main_url), Some(b"AAAA")).unwrap();
-        assert_eq!(url, "https://example.test/1080.mp4");
-        assert_eq!(key.len(), 16);
-    }
-}
+mod unsigned_get_cap;
+#[cfg(test)]
+mod variant_url_shapes;

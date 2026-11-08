@@ -68,6 +68,8 @@ class _AudioPlaybackController extends ChangeNotifier
   Duration _duration = Duration.zero;
   List<AudioVoice> _voices = const [_defaultVoice];
   AudioExtras _extras = const AudioExtras();
+  // A selected version's family is known before its decorations arrive.
+  bool? _versionHasFixedTone;
   SubtitleTrack _subtitles = SubtitleTrack.empty;
 
   /// 当前字幕轨是否由本地估算生成（服务端没有文稿时的兜底）。
@@ -78,6 +80,13 @@ class _AudioPlaybackController extends ChangeNotifier
   /// 没有映射时是空的，此时高亮退回字幕插值那套；两者都没有就不高亮——
   /// 猜一个位置比不高亮更糟。
   AudioTimeTrack _timeTrack = AudioTimeTrack.empty;
+
+  /// 本章的时间点请求是否已经有结果（成功或空）。
+  ///
+  /// 页面要区分「还在拉取」和「拉完了但没有时间轴」：前者不该闪烁地露出
+  /// 入口，后者该把入口永久藏掉。空轨本身分不出这两种状态，所以单独记。
+  bool _timeTrackReady = false;
+
   // Modal routes rebuild independently of the player page. See
   // .agents/notes/implemented/bug-fix/2026-09-16-cross-review-boundaries.md.
   final _readAlong = ValueNotifier<_ReadAlongSnapshot>((
@@ -85,6 +94,10 @@ class _AudioPlaybackController extends ChangeNotifier
     track: SubtitleTrack.empty,
     position: Duration.zero,
     duration: Duration.zero,
+    timeTrackReady: false,
+    textItemId: '',
+    novelItemId: '',
+    novelChapterTitle: '',
   ));
   final _moreState = ValueNotifier<_MoreSnapshot>((
     loading: true,
@@ -169,6 +182,9 @@ class _AudioPlaybackController extends ChangeNotifier
       _bookId,
       itemId,
       toneId: toneId,
+      // 真人讲书的音频时间轴先取 req_type=2；这一版上游对部分书拒绝它，
+      // ApiClient 会在失败时回落一次到 3 并记住，不在这里重试。
+      reqType: _mode == 'narrator' ? 2 : 3,
     );
   }
 
@@ -216,6 +232,8 @@ class _AudioPlaybackController extends ChangeNotifier
           restoreHistory: true,
           autoplay: request.autoplay,
           position: request.startPosition,
+          paragraph: request.startParagraph,
+          fraction: request.startFraction,
         ),
       );
     }
@@ -454,6 +472,8 @@ class _AudioPlaybackController extends ChangeNotifier
     int index, {
     bool restoreHistory = false,
     Duration? position,
+    ({int? paraIndex, int ordinal})? paragraph,
+    double? fraction,
     String? toneId,
     bool autoplay = true,
     bool? completed,
@@ -479,6 +499,7 @@ class _AudioPlaybackController extends ChangeNotifier
       _subtitles = SubtitleTrack.empty;
       _subtitlesEstimated = false;
       _timeTrack = AudioTimeTrack.empty;
+      _timeTrackReady = false;
       _wantPlay =
           autoplay &&
           (_appActive || AudioPreferences.instance.backgroundPlayback.value);
@@ -559,7 +580,38 @@ class _AudioPlaybackController extends ChangeNotifier
       final introSeek = resume <= Duration.zero
           ? _skipPoints.introSeek(duration)
           : null;
-      final restoredPosition = introSeek ?? _boundedPosition(resume, duration);
+      // 段落锚定（从本段听/从本页播放，正文没有 `<span start_time>` 的章）：
+      // 阅读页算不出毫秒，把段落交给这里，用本章 /timepoints 换算起播点。
+      // 拉到的轨直接喂给朗读高亮，下面的高亮刷新就不必重复请求。换算失败
+      // 保持外部传入的位置（阅读页会传 Duration.zero = 从章首开始），绝不
+      // 回退到历史进度——锚定请求要的正是"这一段"，不是"上次听到的地方"。
+      var timeTrackReady = false;
+      Duration? anchorPosition;
+      if (paragraph != null && paragraph.ordinal >= 0) {
+        try {
+          final track = await _loadTimePoints(
+            itemId,
+            source.toneId,
+          ).timeout(const Duration(seconds: 8));
+          if (!_current(generation)) return;
+          _timeTrack = track;
+          _timeTrackReady = true;
+          timeTrackReady = true;
+          final ms = startMsForParagraph(
+            track,
+            paraIndex: paragraph.paraIndex,
+            ordinal: paragraph.ordinal,
+          );
+          if (ms != null) anchorPosition = Duration(milliseconds: ms);
+        } catch (_) {
+          // 没有映射不是错误：这本书没生成过时间轴，或请求超时。
+        }
+      }
+      final restoredPosition =
+          anchorPosition ??
+          _estimatedFromFraction(fraction, duration) ??
+          introSeek ??
+          _boundedPosition(resume, duration);
       if (restoredPosition > Duration.zero) {
         await player.seek(restoredPosition);
         if (!_current(generation, player)) return;
@@ -579,7 +631,12 @@ class _AudioPlaybackController extends ChangeNotifier
       // speech text and are ignored otherwise.
       unawaited(_refreshSubtitles(generation, itemId, source.toneId));
       // 同步映射决定阅读页的朗读高亮；与字幕同时拉取，两个请求互不依赖。
-      unawaited(_refreshTimePoints(generation, itemId, source.toneId));
+      // 段落锚定已经拉过并且命中时跳过，避免同一章重复请求。
+      if (!timeTrackReady) {
+        unawaited(_refreshTimePoints(generation, itemId, source.toneId));
+      } else {
+        _publishListeningSession(playing: _player?.playing ?? false);
+      }
       if (_wantPlay) await _play(player, generation);
       if (!_current(generation, player)) return;
       _syncForeground();
@@ -601,10 +658,10 @@ class _AudioPlaybackController extends ChangeNotifier
 
   /// Fetches one chapter's audio source.
   ///
-  /// The backend picks a pooled device per upstream request and the audio
-  /// player host sometimes answers a body-level 403 for it, so the network
-  /// path retries a few draws before the page reports a failure. An injected
-  /// loader is exact and is never multiplied.
+  /// The backend picks a pooled device per upstream request, so a dropped
+  /// connection or a 5xx can hit a single draw; only those transient failures
+  /// are retried (see [isTransientNetworkFailure]). An injected loader is
+  /// exact and is never multiplied.
   ///
   /// A pure-TTS book has no default voice: the playinfo endpoint answers
   /// NO_THIS_TONE for tone 0, so the first selectable voice is retried once.
@@ -626,15 +683,7 @@ class _AudioPlaybackController extends ChangeNotifier
     final toneId = _toneId;
     AudioSource result;
     try {
-      result = await retryTransient(
-        () => ApiClient.instance
-            .audioSource(itemId, bookId: _bookId, toneId: toneId)
-            .timeout(const Duration(seconds: 30)),
-        // A deterministic "this tone does not exist" answer will not change on
-        // retry: let it reach the fallback below immediately.
-        shouldRetry: (error) =>
-            error is! ApiException || !error.message.contains('NO_THIS_TONE'),
-      );
+      result = await _fetchSource(itemId, toneId);
     } on ApiException catch (error) {
       if (toneId != '0' ||
           !error.message.contains('NO_THIS_TONE') ||
@@ -645,11 +694,7 @@ class _AudioPlaybackController extends ChangeNotifier
       if (fallback == null) rethrow;
       final tone = fallback;
       _toneSwitchedForChapter = true;
-      result = await retryTransient(
-        () => ApiClient.instance
-            .audioSource(itemId, bookId: _bookId, toneId: tone)
-            .timeout(const Duration(seconds: 30)),
-      );
+      result = await _fetchSource(itemId, tone);
     }
     _audioSourceCache[cacheKey] = result;
     while (_audioSourceCache.length > 5) {
@@ -657,6 +702,18 @@ class _AudioPlaybackController extends ChangeNotifier
     }
     return result;
   }
+
+  /// 默认音色与换音色回退共用同一套重试策略。每次尝试最多等 30 秒；超时、
+  /// 404/403 和业务错误码（NO_THIS_TONE、审核失败）再试也是同一个结果，
+  /// 只有网络中断、HTTP 408/429/5xx 值得再来一次——否则一次失败最坏要拖
+  /// 近三分钟才告诉用户。
+  Future<AudioSource> _fetchSource(String itemId, String toneId) =>
+      retryTransient(
+        () => ApiClient.instance
+            .audioSource(itemId, bookId: _bookId, toneId: toneId)
+            .timeout(const Duration(seconds: 30)),
+        shouldRetry: isTransientNetworkFailure,
+      );
 
   /// 离线命中：当前音色下这一章已下载完成时直接用本地文件。
   ///
@@ -731,13 +788,18 @@ class _AudioPlaybackController extends ChangeNotifier
       final track = await _loadTimePoints(itemId, toneId);
       if (!_current(generation)) return;
       _timeTrack = track;
-      // The chapter may already be playing: publish once so the reader picks
-      // the highlight up without waiting for the next position tick.
-      _publishListeningSession(playing: _player?.playing ?? false);
     } catch (_) {
       // 没有映射不是错误：这本书没生成过时间轴，或者章节文本已变化。保留
       // 上一次的空值，阅读页就不高亮。
+      if (!_current(generation)) return;
     }
+    // 无论有没有时间轴，这一章的请求都已经有结果了：页面据此决定是继续等
+    // 还是永久藏掉依赖时间轴的入口。
+    _timeTrackReady = true;
+    // The chapter may already be playing: publish once so the page snapshot
+    // carries the new timeline without waiting for the next position tick.
+    _publishReadAlong();
+    _publishListeningSession(playing: _player?.playing ?? false);
   }
 
   void _publishReadAlong() {
@@ -750,6 +812,12 @@ class _AudioPlaybackController extends ChangeNotifier
       position: preview == null
           ? _position.value
           : Duration(milliseconds: preview.round()),
+      // 章节时间轴：订阅者据此把音频位置映射到原著正文。没有时间轴时
+      // `timeTrackReady` 仍会变成 true，好让页面区分「还没拉到」和「没有」。
+      timeTrackReady: _timeTrackReady,
+      textItemId: _timeTrack.textItemId,
+      novelItemId: _timeTrack.novelItemId,
+      novelChapterTitle: _timeTrack.novelChapterTitle,
     );
   }
 
@@ -800,6 +868,12 @@ class _AudioPlaybackController extends ChangeNotifier
       subtitles: _subtitles,
       // 官方通道：当前毫秒正在读的「第几段第几个字」。有它时高亮不用猜。
       audioParaRange: _paraRangeAt(position),
+      // 真人讲书的阅读页别名：音频书/章节 id → 原著书/章节 id。阅读页据此
+      // 继续匹配会话；没有时间轴映射时章节别名为空，阅读页退回不匹配。
+      novelBookId: _linkedNovelBookId,
+      novelChapterId: _linkedNovelChapterId.isEmpty
+          ? null
+          : _linkedNovelChapterId,
     );
   }
 
@@ -837,6 +911,23 @@ class _AudioPlaybackController extends ChangeNotifier
     return duration > Duration.zero && position > duration
         ? duration
         : position;
+  }
+
+  /// 段落锚点查不到时间轴时，按正文读进度折算起播位置。
+  ///
+  /// [fraction] 是阅读页给的比例（该段在本章正文里的字符位置 / 全章字数）。
+  /// 折算假设音频平均语速，误差随章节长度增长；它的价值不在精度，而在
+  /// **不落到章首** —— 精确时间轴拿不到时，「差几十秒」远好于「整章重播」。
+  /// 时长未知（源没报 duration）或比例无效时返回 null，交给原有回落链。
+  static Duration? _estimatedFromFraction(double? fraction, Duration duration) {
+    if (fraction == null || !fraction.isFinite) return null;
+    if (duration <= Duration.zero) return null;
+    final clamped = fraction <= 0 ? 0.0 : (fraction >= 1 ? 1.0 : fraction);
+    if (clamped <= 0) return null;
+    return _boundedPosition(
+      Duration(milliseconds: (duration.inMilliseconds * clamped).round()),
+      duration,
+    );
   }
 
   void _subscribe(NativePlayer player, int generation) {
@@ -938,6 +1029,8 @@ class _AudioPlaybackController extends ChangeNotifier
       'chapterId': _chapters[index].itemId,
       'episodeId': _chapters[index].itemId,
       'episode': index,
+      // Lets the cold-start capsule show whole-book progress.
+      'chapterCount': _chapters.length,
       'position': position.inMilliseconds / 1000,
       'duration': duration.inMilliseconds / 1000,
       'maxScroll': duration.inMilliseconds / 1000,
@@ -1124,7 +1217,7 @@ class _AudioPlaybackController extends ChangeNotifier
   /// TTS plays on the ebook's chapter IDs, even when the panel was opened
   /// from a fixed recording. Never send its tone to the recording's chapters.
   String? get _ttsBookId {
-    if (!_extras.tones.hasFixedTone) return _bookId;
+    if (!_hasFixedTone) return _bookId;
     final id = _extras.tones.relatedNovel?.id;
     return id != null && id.isNotEmpty && id != _bookId ? id : null;
   }
@@ -1132,7 +1225,23 @@ class _AudioPlaybackController extends ChangeNotifier
   List<AudioTone> get _ttsTones =>
       _ttsBookId == null ? const [] : _extras.tones.ttsTones;
 
+  /// 这部剧/录音关联的原著书 id；书本身就是文本（智能朗读）时为 null。
+  ///
+  /// 「边听边读」打开的是这本原著，阅读页用的书 id 与章节 id 都和音频不是
+  /// 一套。会话把它作为别名发布，阅读页才能继续匹配播放状态。
+  String? get _linkedNovelBookId {
+    final novel = _extras.tones.relatedNovel;
+    if (novel == null) return null;
+    final id = novel.id.trim();
+    return id.isEmpty || id == _bookId ? null : id;
+  }
+
+  /// 当前集在时间轴上对应的原著章节 id；没有映射时为空。
+  String get _linkedNovelChapterId => _timeTrack.novelItemId;
+
   List<AudioTone> get _narratorTones => _extras.tones.narratorTones;
+
+  bool get _hasFixedTone => _versionHasFixedTone ?? _extras.tones.hasFixedTone;
 
   /// Current family, derived from the selected tone so the voice card always
   /// describe what is actually playing: `tts` (智能朗读) or `narrator` (真人讲书).
@@ -1140,8 +1249,7 @@ class _AudioPlaybackController extends ChangeNotifier
   /// A fixed recording starts on its narrator. Selecting intelligent reading
   /// opens the associated novel instead of relabeling the current recording.
   String get _mode =>
-      _extras.tones.hasFixedTone ||
-          _narratorTones.any((tone) => tone.id == _toneId)
+      _hasFixedTone || _narratorTones.any((tone) => tone.id == _toneId)
       ? 'narrator'
       : 'tts';
 
@@ -1238,6 +1346,9 @@ class _AudioPlaybackController extends ChangeNotifier
       return;
     }
     var generation = _generation;
+    final targetHasFixedTone = _narratorTones.any(
+      (tone) => tone.id == targetId,
+    );
     _update(() => _switchingVersion = true);
     try {
       final chapters = await (request.directoryLoader ?? _defaultDirectory)(
@@ -1261,6 +1372,7 @@ class _AudioPlaybackController extends ChangeNotifier
         _chapters = List<Chapter>.unmodifiable(chapters);
         _index = start;
         _toneId = toneId;
+        _versionHasFixedTone = targetHasFixedTone;
         _extras = const AudioExtras();
         _excerpt = '';
         _error = null;

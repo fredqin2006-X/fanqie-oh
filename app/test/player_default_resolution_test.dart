@@ -76,7 +76,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(await PlayerPreferences.loadDefaultResolution(), 720);
       expect(find.text('720P'), findsOneWidget);
-      await tester.pageBack();
+      await tester.tap(find.byTooltip('返回'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('短剧'));
       await tester.pumpAndSettle();

@@ -12,10 +12,10 @@ class HomeFeedSnapshot {
   final List<MediaItem> items;
 
   /// The page's block structure (see [HomeCell]), when the rendered page had
-  /// one. Without it a cold start seeds only [items], the home page falls
-  /// back to the old spotlight+grid pipeline, and flips to the block layout a
-  /// second later when the network answers. Empty for older records written
-  /// before cells were cached.
+  /// one. Without it a cold start seeds only [items], the home page can only
+  /// draw that flat grid, and flips to the block layout a second later when
+  /// the network answers. Empty for older records written before cells were
+  /// cached.
   final List<HomeCell> cells;
 
   final bool hasMore;
@@ -169,12 +169,48 @@ class HomeFeedCache {
         // layout on the first frame instead of the legacy flat grid. Written
         // only when present: a record without blocks stays readable by the
         // previous format.
-        if (cells.isNotEmpty)
-          'cells': cells.map((cell) => cell.toMap()).toList(),
+        if (cells.isNotEmpty) 'cells': _boundedCellMaps(cells),
       });
     } catch (_) {
       // The next successful load overwrites this entry anyway.
     }
+  }
+
+  /// Serializes [cells] under the same card budget the flat [items] list gets.
+  ///
+  /// Every appended page lands in the stream block, so without a budget the
+  /// tree written on each snapshot grows for as long as the user keeps
+  /// scrolling. Block payloads (style, extra, url, name) are kept even after
+  /// the budget is spent so section headers still render; only cards are
+  /// dropped, and at most [maxItems] top-level blocks are written.
+  List<Map<String, dynamic>> _boundedCellMaps(List<HomeCell> cells) {
+    var remaining = maxItems;
+    List<HomeCell> trim(List<HomeCell> input) {
+      final out = <HomeCell>[];
+      for (final cell in input.take(maxItems)) {
+        final items = <MediaItem>[];
+        for (final item in cell.items) {
+          if (remaining <= 0) break;
+          remaining--;
+          items.add(item);
+        }
+        out.add(
+          HomeCell(
+            showType: cell.showType,
+            name: cell.name,
+            id: cell.id,
+            style: cell.style,
+            items: items,
+            children: trim(cell.children),
+            url: cell.url,
+            extra: cell.extra,
+          ),
+        );
+      }
+      return out;
+    }
+
+    return [for (final cell in trim(cells)) cell.toMap()];
   }
 
   /// Test seam: closes the memoized box so a later save reloads fresh storage.

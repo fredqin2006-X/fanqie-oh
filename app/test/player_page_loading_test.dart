@@ -38,49 +38,49 @@ void main() {
         );
   });
 
-  testWidgets(
-    'cover stays above the mounted texture until first frame; timings split phases',
-    (tester) async {
-      final source = Completer<Map<String, dynamic>>();
-      final create = Completer<void>();
-      final session = _Session(
-        loader: (_) => source.future,
-        factory: () =>
-            ControlledNativePlayer(createGate: create, hasFirstFrame: false),
-      );
-      await _mount(tester, session);
-      expect(find.byKey(const ValueKey('player-cover')), findsOneWidget);
-      expect(find.byType(Texture), findsNothing);
-      session.elapsed = const Duration(milliseconds: 120);
-      source.complete(_source('1'));
-      await _flush(tester);
-      session.elapsed = const Duration(milliseconds: 200);
-      create.complete();
-      await _flush(tester);
-      expect(find.byType(Texture), findsOneWidget);
-      expect(find.byKey(const ValueKey('player-cover')), findsOneWidget);
-      expect(session.samples, isEmpty);
-      final textureElement = find.byType(Texture).evaluate().single;
-      session.elapsed = const Duration(milliseconds: 300);
-      session.players.single.emitFirstFrame();
-      await _flush(tester);
-      expect(find.byKey(const ValueKey('player-cover')), findsNothing);
-      expect(find.byType(Texture).evaluate().single, same(textureElement));
-      final sample = session.samples.single;
-      expect(sample.stagesMs['address'], 120);
-      expect(sample.stagesMs['create'], 80);
-      expect(sample.playToFirstFrameMs, 100);
-      expect(sample.totalMs, 300);
-      expect(sample.outcome, 'firstFrame');
-      // Later buffering keeps the last video frame; no poster flash or new sample.
-      session.players.single.emitBuffering(true);
-      session.players.single.emitFirstFrame();
-      await _flush(tester);
-      expect(find.byKey(const ValueKey('player-cover')), findsNothing);
-      expect(find.byType(CircularProgressIndicator), findsOneWidget);
-      expect(session.samples, hasLength(1));
-    },
-  );
+  testWidgets('no cover while the first frame is pending; timings split phases', (
+    tester,
+  ) async {
+    final source = Completer<Map<String, dynamic>>();
+    final create = Completer<void>();
+    final session = _Session(
+      loader: (_) => source.future,
+      factory: () =>
+          ControlledNativePlayer(createGate: create, hasFirstFrame: false),
+    );
+    await _mount(tester, session);
+    // 加载期只留黑底 + 加载圈：封面是竖图，铺进 16:9 盒里会被裁成一条。
+    expect(find.byKey(const ValueKey('player-cover')), findsNothing);
+    expect(find.byType(Texture), findsNothing);
+    session.elapsed = const Duration(milliseconds: 120);
+    source.complete(_source('1'));
+    await _flush(tester);
+    session.elapsed = const Duration(milliseconds: 200);
+    create.complete();
+    await _flush(tester);
+    expect(find.byType(Texture), findsOneWidget);
+    expect(find.byKey(const ValueKey('player-cover')), findsNothing);
+    expect(session.samples, isEmpty);
+    final textureElement = find.byType(Texture).evaluate().single;
+    session.elapsed = const Duration(milliseconds: 300);
+    session.players.single.emitFirstFrame();
+    await _flush(tester);
+    expect(find.byKey(const ValueKey('player-cover')), findsNothing);
+    expect(find.byType(Texture).evaluate().single, same(textureElement));
+    final sample = session.samples.single;
+    expect(sample.stagesMs['address'], 120);
+    expect(sample.stagesMs['create'], 80);
+    expect(sample.playToFirstFrameMs, 100);
+    expect(sample.totalMs, 300);
+    expect(sample.outcome, 'firstFrame');
+    // Later buffering keeps the last video frame; no poster flash or new sample.
+    session.players.single.emitBuffering(true);
+    session.players.single.emitFirstFrame();
+    await _flush(tester);
+    expect(find.byKey(const ValueKey('player-cover')), findsNothing);
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    expect(session.samples, hasLength(1));
+  });
 
   testWidgets('native failure logs phase and codes without exception text', (
     tester,
@@ -112,23 +112,23 @@ void main() {
   });
 
   testWidgets(
-    'a frame arriving during resume initialization waits behind the cover',
+    'a frame arriving during resume initialization waits behind the spinner',
     (tester) async {
-      final seek = Completer<void>();
+      final rate = Completer<void>();
       final session = _Session(
         store: ControlledReaderStore(entry: {'episodeId': '1', 'position': 45}),
         factory: () =>
-            ControlledNativePlayer(seekGate: seek, hasFirstFrame: false),
+            ControlledNativePlayer(rateGate: rate, hasFirstFrame: false),
       );
       await _mount(tester, session);
       expect(find.byType(Texture), findsOneWidget);
       session.elapsed = const Duration(milliseconds: 50);
       session.players.single.emitFirstFrame();
       await _flush(tester);
-      expect(find.byKey(const ValueKey('player-cover')), findsOneWidget);
+      expect(find.byKey(const ValueKey('player-cover')), findsNothing);
       expect(session.samples, isEmpty);
       session.elapsed = const Duration(milliseconds: 200);
-      seek.complete();
+      rate.complete();
       await _flush(tester);
       expect(find.byKey(const ValueKey('player-cover')), findsNothing);
       expect(session.players.single.position, const Duration(seconds: 45));
@@ -221,7 +221,7 @@ void main() {
       second.complete(_source('2'));
       await _flush(tester);
       expect(session.players, hasLength(2));
-      expect(find.byKey(const ValueKey('player-cover')), findsOneWidget);
+      expect(find.byKey(const ValueKey('player-cover')), findsNothing);
       session.players.last.emitFirstFrame();
       await _flush(tester);
       expect(session.samples.last.source, 'prefetchPending');
@@ -282,8 +282,9 @@ void main() {
           displayed ? 'firstFrame' : 'error',
         );
         expect(session.store.entry?['episodeId'], displayed ? '2' : '1');
-        expect(find.byType(CircularProgressIndicator), findsNothing);
-        await tester.tap(find.widgetWithText(OutlinedButton, '重试'));
+        final spinner = displayed ? findsNothing : findsOneWidget; // 静默重试中
+        expect(find.byType(CircularProgressIndicator), spinner);
+        if (displayed) await tester.tap(find.text('重试'));
         await tester.pump(const Duration(milliseconds: 350));
         await _flush(tester);
         expect(session.requests, ['1', '2', '2']);
@@ -294,7 +295,7 @@ void main() {
         session.players.last.emitFirstFrame();
         await _flush(tester);
         expect(session.samples.last.source, 'network');
-        expect(session.samples.last.trigger, 'retry');
+        expect(session.samples.last.trigger, displayed ? 'retry' : 'autoRetry');
         expect(session.players.last.isPlaying, true);
       },
     );
@@ -595,10 +596,26 @@ void main() {
       });
       final start = Completer<void>();
       final calls = <String>[];
+      const events = MethodChannel('fqapp/native_player/events');
+      final messenger = tester.binding.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(events, (_) async => null);
       tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
         const MethodChannel('fqapp/native_player'),
         (call) async {
           calls.add(call.method);
+          if (call.method == 'create') {
+            await messenger.handlePlatformMessage(
+              events.name,
+              const StandardMethodCodec().encodeSuccessEnvelope({
+                'playerId': 42,
+                'type': 'created',
+                'value': 1,
+              }),
+              (_) {},
+            );
+            return {'playerId': 42};
+          }
+          if (call.method == 'allocateFloatingOwner') return 1;
           if (call.method == 'canDrawOverlays') return true;
           if (call.method == 'startFloating') await start.future;
           return null;
@@ -641,13 +658,35 @@ void main() {
       expect(player.playing, outcome != 'ready');
       if (outcome != 'rejected') expect(calls, contains('stopFloating'));
       expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await _flush(tester);
+      await tester.pump(const Duration(seconds: 31));
+      await messenger.handlePlatformMessage(events.name, null, (_) {});
+      messenger.setMockMethodCallHandler(events, null);
     });
   }
 }
 
 class _PipTestPlayer extends ControlledNativePlayer {
+  final _binding = NativePlayer();
+
   @override
-  int? get playerId => isCreated ? 42 : null;
+  int? get playerId => _binding.playerId;
+
+  @override
+  bool get isFloating => _binding.isFloating;
+
+  @override
+  Future<int> create(String cdnUrl, String keyHex, {int? startMs}) async {
+    await _binding.create(cdnUrl, keyHex, startMs: startMs);
+    return super.create(cdnUrl, keyHex, startMs: startMs);
+  }
+
+  @override
+  Future<void> dispose() async {
+    await _binding.dispose();
+    await super.dispose();
+  }
 }
 
 Map<String, dynamic> _source(String id) => {

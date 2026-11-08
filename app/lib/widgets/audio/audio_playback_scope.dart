@@ -6,16 +6,55 @@ class AudioPlaybackScope extends StatefulWidget {
     super.key,
     required this.navigatorKey,
     required this.child,
+    this.recentListen,
   });
 
   final GlobalKey<NavigatorState> navigatorKey;
   final Widget child;
+
+  /// Supplies the cold-start idle capsule. Null disables it.
+  final RecentListenLoader? recentListen;
 
   static Future<void> startSystemTts(BuildContext context, SystemTtsBook book) {
     final owner = context.findAncestorStateOfType<_AudioPlaybackScopeState>();
     if (owner == null) throw StateError('当前阅读入口不支持持续朗读');
     return owner.startSystemTts(book);
   }
+
+  /// Stops a system-TTS session for [bookId], if one exists. Used before an AI
+  /// display update when playback is paused so resuming cannot read stale text.
+  static Future<void> stopSystemTtsForBook(
+    BuildContext context,
+    String bookId,
+  ) {
+    final owner = context.findAncestorStateOfType<_AudioPlaybackScopeState>();
+    return owner?.stopSystemTtsForBook(bookId) ?? Future<void>.value();
+  }
+
+  /// 在后台起播，不打开听书页；实现见 [ReaderAudioBridge]（同库 part）。
+  @visibleForTesting
+  static BackgroundStartHandler? startListeningOverride;
+
+  static Future<bool> startListeningInBackground(
+    BuildContext context,
+    AudioPage request,
+  ) => ReaderAudioBridge.startListeningInBackground(context, request);
+
+  /// 段落锚点跳转（双击跳读用）：与「从本页播放」同一套寻址。
+  static bool jumpToParagraph(
+    BuildContext context,
+    String chapterId, {
+    required int? paraIndex,
+    required int ordinal,
+  }) => ReaderAudioBridge.jumpToParagraph(
+    context,
+    chapterId,
+    paraIndex: paraIndex,
+    ordinal: ordinal,
+  );
+
+  @visibleForTesting
+  static ParagraphJumpHandler? jumpToParagraphOverride;
 
   /// 把正在进行的朗读跳到 [position]（阅读页双击跳读用）。
   ///
@@ -26,6 +65,27 @@ class AudioPlaybackScope extends StatefulWidget {
     return owner?.seekActive(position) ?? false;
   }
 
+  /// 阅读页那枚「暂停播放 / 继续播放」胶囊：切换这本书的播放状态。
+  ///
+  /// 对应官方 `ReaderPlayerButton`（`ajo.xml` 的 `TextView j53`）。没有正在
+  /// 控制这本书的会话时返回 false；音频与系统 TTS 都路由到各自的控制器。
+  static bool togglePlayback(BuildContext context, String bookId) {
+    final owner = context.findAncestorStateOfType<_AudioPlaybackScopeState>();
+    return owner?.togglePlayback(bookId) ?? false;
+  }
+
+  /// 阅读页手动翻页：把这本书的播放暂停。
+  ///
+  /// 官方 `handlePlayWhenPageChange`（`AudioSyncReaderController.java:1242-1295`）
+  /// 在同章翻页时 `pausePlayer()` 并亮出「原进度 / 从本页听」。和
+  /// [togglePlayback] 不同，这里只在正在播时暂停；已经是暂停态时调用不会反着
+  /// 播起来。
+  static void pauseIfPlaying(BuildContext context, String bookId) {
+    context.findAncestorStateOfType<_AudioPlaybackScopeState>()?.pauseIfPlaying(
+      bookId,
+    );
+  }
+
   /// 把朗读切到 [chapterId]，并从 [position] 起播（双击跳读，可跨章）。
   ///
   /// 同章就是 seek；换章走 [_openChapter]，它会释放旧播放器、按给定位置起播，
@@ -34,10 +94,11 @@ class AudioPlaybackScope extends StatefulWidget {
     BuildContext context,
     String chapterId,
     Duration position,
-  ) {
-    final owner = context.findAncestorStateOfType<_AudioPlaybackScopeState>();
-    return owner?.jumpToChapter(chapterId, position) ?? false;
-  }
+  ) => ReaderAudioBridge.jumpToChapter(context, chapterId, position);
+
+  /// 测试缝：拦截句级/段首毫秒跳转（双击跳读用例）。
+  @visibleForTesting
+  static ChapterJumpHandler? jumpToChapterOverride;
 
   /// 取指定章节的逐句字幕（阅读页跨章双击跳读用）。
   ///
@@ -63,7 +124,17 @@ class _AudioPlaybackScopeState extends State<AudioPlaybackScope> {
   Future<void> _queue = Future<void>.value();
   final _views = <_AudioPageState>{};
   bool _rebuildPending = false;
+  _AudioPlaybackController? _openingAudio;
   late final Future<void> Function(NativePlayer) _playGate = _beforePlay;
+
+  /// Rebuilds the capsule, which lives in the Navigator's Overlay instead of
+  /// under this widget.
+  final _tick = ValueNotifier<int>(0);
+  AudioFloatingRoutes? _routes;
+  RecentListen? _recent;
+  bool _resuming = false;
+  bool _readerVoicePickerOpen = false;
+  Object? _toastedError;
 
   /// 跨章跳读要用的字幕轨缓存，键 = `音色|章节 id`。
   ///
@@ -76,6 +147,32 @@ class _AudioPlaybackScopeState extends State<AudioPlaybackScope> {
   void initState() {
     super.initState();
     NativePlayer.beforePlay = _playGate;
+    unawaited(_loadRecent());
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final routes = AudioFloatingRouteScope.read(context);
+    if (identical(routes, _routes)) return;
+    _routes?.unmount();
+    _routes = routes;
+    routes?.mount(_buildCapsule);
+  }
+
+  Future<void> _loadRecent() async {
+    final loader = widget.recentListen;
+    if (loader == null) return;
+    RecentListen? recent;
+    try {
+      recent = await loader();
+    } catch (_) {
+      // The idle capsule is a convenience; history read failures hide it.
+      return;
+    }
+    if (!mounted || recent == null || _session != null || _tts != null) return;
+    _recent = recent;
+    _changed();
   }
 
   Future<void> _beforePlay(NativePlayer player) async {
@@ -98,6 +195,62 @@ class _AudioPlaybackScopeState extends State<AudioPlaybackScope> {
     return true;
   }
 
+  /// 阅读页的书 id 是否属于这个会话：音频书自己的 id，或时间轴别名到的
+  /// 原著（真人讲书的「边听边读」打开原著后仍要能控制播放）。
+  bool _sessionBookMatches(String bookId) {
+    final session = _session;
+    if (session == null || session._closed) return false;
+    return session._bookId == bookId || session._linkedNovelBookId == bookId;
+  }
+
+  /// 把阅读页的章节 id 解析成播放器使用的音频章节 id。
+  ///
+  /// 智能朗读两边相同，直接命中；真人讲书的阅读页传的是原著章节 id，只有
+  /// 时间轴映射到的当前集才能换回音频章节。其它原著章节没有反查表，返回
+  /// null —— 宁可不跳，也不串到别的音频章。
+  String? _audioChapterIdFor(String readerChapterId) {
+    final session = _session;
+    if (session == null || session._closed || readerChapterId.isEmpty) {
+      return null;
+    }
+    if (session._chapters.any((c) => c.itemId == readerChapterId)) {
+      return readerChapterId;
+    }
+    if (session._timeTrack.novelItemId != readerChapterId) return null;
+    if (session._index < 0 || session._index >= session._chapters.length) {
+      return null;
+    }
+    return session._chapters[session._index].itemId;
+  }
+
+  /// 见 [AudioPlaybackScope.togglePlayback]。
+  bool togglePlayback(String bookId) {
+    final tts = _tts;
+    if (tts != null && !tts.closed && tts.book.bookId == bookId) {
+      unawaited(tts.toggle());
+      return true;
+    }
+    final session = _session;
+    if (session == null || session._closed) return false;
+    // 只控制「正在听的那本」：阅读页可能翻到别的书，那与本会话无关。
+    if (!_sessionBookMatches(bookId) || !session._ready) return false;
+    unawaited(session._togglePlayback());
+    return true;
+  }
+
+  /// 见 [AudioPlaybackScope.pauseIfPlaying]。
+  void pauseIfPlaying(String bookId) {
+    final tts = _tts;
+    if (tts != null && !tts.closed && tts.book.bookId == bookId) {
+      if (tts.wantPlay || tts.loading) unawaited(tts.pause());
+      return;
+    }
+    final session = _session;
+    if (session == null || session._closed) return;
+    if (!_sessionBookMatches(bookId) || !session._ready) return;
+    if (session._wantPlay) unawaited(session._pauseForOtherMedia());
+  }
+
   /// 见 [AudioPlaybackScope.jumpToChapter]。换章要重新加载音频源，所以不像
   /// [seekActive] 那样要求 _ready —— 正在缓冲中跳读也是合法操作。
   /// 见 [AudioPlaybackScope.timelineForChapter]。
@@ -106,26 +259,33 @@ class _AudioPlaybackScopeState extends State<AudioPlaybackScope> {
     if (session == null || session._closed) {
       return Future.value(SubtitleTrack.empty);
     }
-    final index = session._chapters.indexWhere((c) => c.itemId == chapterId);
+    final audioChapterId = _audioChapterIdFor(chapterId);
+    if (audioChapterId == null) return Future.value(SubtitleTrack.empty);
+    final index = session._chapters.indexWhere(
+      (c) => c.itemId == audioChapterId,
+    );
     if (index < 0) return Future.value(SubtitleTrack.empty);
     // 正在播的就是这一章：会话里的轨最新，直接给。
     if (index == session._index && session._subtitles.isNotEmpty) {
       return Future.value(session._subtitles);
     }
-    final key = '${session._toneId}|$chapterId';
+    final key = '${session._toneId}|$audioChapterId';
     final cached = _timelineCache[key];
     if (cached != null) return Future.value(cached);
     final pending = _timelinePending[key];
     if (pending != null) return pending;
     final future = _loadTimeline(
       key,
-      session._loadSubtitles(chapterId, session._toneId),
+      session._loadSubtitles(audioChapterId, session._toneId),
     );
     _timelinePending[key] = future;
     return future;
   }
 
-  Future<SubtitleTrack> _loadTimeline(String key, Future<SubtitleTrack> load) async {
+  Future<SubtitleTrack> _loadTimeline(
+    String key,
+    Future<SubtitleTrack> load,
+  ) async {
     try {
       final track = await load;
       // 命中不了的章不再重复请求；超过 8 条就丢最旧的一条。
@@ -142,7 +302,11 @@ class _AudioPlaybackScopeState extends State<AudioPlaybackScope> {
   bool jumpToChapter(String chapterId, Duration position) {
     final session = _session;
     if (session == null || session._closed) return false;
-    final index = session._chapters.indexWhere((c) => c.itemId == chapterId);
+    final audioChapterId = _audioChapterIdFor(chapterId);
+    if (audioChapterId == null) return false;
+    final index = session._chapters.indexWhere(
+      (c) => c.itemId == audioChapterId,
+    );
     if (index < 0) return false;
     if (index == session._index) {
       if (!session._ready) return false;
@@ -161,7 +325,10 @@ class _AudioPlaybackScopeState extends State<AudioPlaybackScope> {
       final current = _session;
       if (current != null &&
           !current._closed &&
-          current._bookId == request.bookId) {
+          _sessionBookMatches(request.bookId)) {
+        // 别名书（真人讲书的原著）：阅读页传的是原著 id，会话记的是音频
+        // 专辑 id。命中别名时只复用，不关闭重开。
+        final aliased = current._bookId != request.bookId;
         if ((!request.resumeSession || request.startPosition != null) &&
             request.chapters.isNotEmpty) {
           final chapter =
@@ -169,21 +336,29 @@ class _AudioPlaybackScopeState extends State<AudioPlaybackScope> {
                 0,
                 request.chapters.length - 1,
               )];
-          final index = current._chapters.indexWhere(
-            (c) => c.itemId == chapter.itemId,
-          );
-          if (index >= 0) {
-            unawaited(
-              current._openChapter(
-                index,
-                position: request.startPosition,
-                toneId: request.initialToneId,
-                restoreHistory: true,
-                autoplay: request.autoplay,
-              ),
+          final audioChapterId = _audioChapterIdFor(chapter.itemId);
+          if (audioChapterId != null) {
+            final index = current._chapters.indexWhere(
+              (c) => c.itemId == audioChapterId,
             );
-            return current;
+            if (index >= 0) {
+              unawaited(
+                current._openChapter(
+                  index,
+                  position: request.startPosition,
+                  paragraph: request.startParagraph,
+                  fraction: request.startFraction,
+                  toneId: request.initialToneId,
+                  restoreHistory: true,
+                  autoplay: request.autoplay,
+                ),
+              );
+              return current;
+            }
           }
+          // 别名章节映射不到当前音频集：保持当前播放，拿原著 id 新建会话
+          // 只会得到一个不存在的音频书。
+          if (aliased) return current;
           // A refreshed directory can remove an old chapter. Start the exact
           // requested directory instead of silently retaining another chapter.
         } else {
@@ -194,6 +369,7 @@ class _AudioPlaybackScopeState extends State<AudioPlaybackScope> {
       if (!mounted) return null;
       final session = _AudioPlaybackController(request);
       _session = session;
+      _recent = null;
       session.onStop = () => unawaited(stop(session));
       session.addListener(_changed);
       session.start();
@@ -217,6 +393,7 @@ class _AudioPlaybackScopeState extends State<AudioPlaybackScope> {
     _session = null;
     session?.removeListener(_changed);
     _changed();
+    if (session != null) _retireViews(session);
     await session?.close();
   }
 
@@ -237,6 +414,7 @@ class _AudioPlaybackScopeState extends State<AudioPlaybackScope> {
         onStop: () => unawaited(stopTts(session)),
       );
       _tts = session;
+      _recent = null;
       session.addListener(_changed);
       session.start();
       _changed();
@@ -253,6 +431,15 @@ class _AudioPlaybackScopeState extends State<AudioPlaybackScope> {
     return next;
   }
 
+  Future<void> stopSystemTtsForBook(String bookId) {
+    final next = _queue.then((_) async {
+      final tts = _tts;
+      if (tts != null && tts.book.bookId == bookId) await _closeTts();
+    });
+    _queue = next.catchError((Object _) {});
+    return next;
+  }
+
   Future<void> _closeTts() async {
     final session = _tts;
     _tts = null;
@@ -261,22 +448,99 @@ class _AudioPlaybackScopeState extends State<AudioPlaybackScope> {
     await session?.close();
   }
 
-  void _openTts(SystemTtsPlayback session) {
-    if (session.closed ||
-        !identical(_tts, session) ||
-        identical(_ttsPage, session)) {
+  /// 暂停态换引擎后的接续：按刚写进偏好的引擎把这本书接起来。
+  ///
+  /// 只做 scope 本地能做的部分——系统朗读在播时切智能朗读（关掉 TTS、
+  /// 按同一本书起作品音频，后台接续不推页面），同引擎就是恢复播放。作品
+  /// 音频切系统朗读需要正文，只有阅读页构造得出 [SystemTtsBook]，那一半
+  /// 由 [ReaderAudioBridge.resumeWithEngine] 先问阅读页注册的接续通道，
+  /// 问不到才落到这里返回 false，调用方拿它决定提示语。
+  Future<bool> resumeWithEngine(ListenEngine engine) async {
+    final tts = _tts;
+    if (tts != null && !tts.closed) {
+      if (engine == ListenEngine.system) {
+        await tts.resume();
+        return true;
+      }
+      final book = tts.book;
+      final request = AudioPage(
+        bookId: book.bookId,
+        title: book.title,
+        cover: book.coverUrl,
+        chapters: book.chapters,
+        startIndex: tts.index,
+      );
+      try {
+        final override = AudioPlaybackScope.startListeningOverride;
+        if (override != null) {
+          final accepted = await override(context, request);
+          if (accepted) await _closeTts();
+          return accepted;
+        }
+        if (book.localOnly) return false;
+        // 当前 context 属于 scope 自身，不能经祖先查找取回自己；切换由队列接管。
+        return await acquire(request) != null;
+      } catch (_) {
+        return false;
+      }
+    }
+    final session = _session;
+    if (session != null && !session._closed && session._ready) {
+      if (engine == ListenEngine.system) return false;
+      // 选择当前引擎只恢复播放，不能把缓冲中或已恢复的会话反向暂停。
+      if (!session._wantPlay) await session._togglePlayback();
+      return true;
+    }
+    return false;
+  }
+
+  /// 这次换引擎是否必须经过阅读页：音频 → 系统朗读要正文，scope 给不出；
+  /// 系统朗读切智能朗读也优先走阅读页，起点（当前页）与跟随都留在书页。
+  bool _switchNeedsReader(ListenEngine engine) {
+    final tts = _tts;
+    if (tts != null && !tts.closed) return engine == ListenEngine.smart;
+    final session = _session;
+    return session != null && !session._closed && engine == ListenEngine.system;
+  }
+
+  /// Use the same audio/novel identity mapping as the reader's other controls.
+  bool _switchBookMatches(String bookId) {
+    final tts = _tts;
+    if (tts != null && !tts.closed) return tts.book.bookId == bookId;
+    return _sessionBookMatches(bookId);
+  }
+
+  /// 点封面：回到正在朗读的那本书的书页。
+  ///
+  /// 系统朗读没有自己的播放页——朗读进度本来就挂在正文上（高亮、跟随都在
+  /// [ReaderPage] 里），所以封面把人送回书页，定位到正在读的章节，而不是
+  /// 另开一个控制页把书页盖住。
+  ///
+  /// 阅读页菜单里的那颗胶囊已经站在书页上了（[onOpenBook] 传进来），此时
+  /// 收起菜单就是「回到书页」，不再往上叠一层。
+  void _openTts(SystemTtsPlayback session, {VoidCallback? onOpenBook}) {
+    if (session.closed || !identical(_tts, session)) return;
+    if (onOpenBook != null) {
+      onOpenBook();
       return;
     }
+    if (identical(_ttsPage, session)) return;
     final navigator = widget.navigatorKey.currentState;
     if (navigator == null) return;
+    final book = session.book;
     _ttsPage = session;
     unawaited(
       navigator
           .push<void>(
             MaterialPageRoute<void>(
-              builder: (_) => SystemTtsPlaybackPage(
-                session: session,
-                onClose: () => unawaited(stopTts(session)),
+              builder: (_) => ReaderPage(
+                bookId: book.bookId,
+                title: book.title,
+                cover: book.coverUrl,
+                chapters: book.chapters,
+                startIndex: session.index,
+                localOnly: book.localOnly,
+                chapterLoader: book.textLoader,
               ),
             ),
           )
@@ -286,51 +550,25 @@ class _AudioPlaybackScopeState extends State<AudioPlaybackScope> {
     );
   }
 
-  void viewChanged(_AudioPageState view) {
+  void registerView(_AudioPageState view) {
     _views.add(view);
-    _changed();
   }
 
-  void removeView(_AudioPageState view) {
+  void unregisterView(_AudioPageState view) {
     _views.remove(view);
-    _changed();
   }
 
   void _changed() {
     if (!mounted || _rebuildPending) return;
     _rebuildPending = true;
-    // Views attach/detach while Navigator builds. Defer the ancestor rebuild.
+    // Session acquisition can notify while descendant pages attach.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _rebuildPending = false;
-      if (mounted) setState(() {});
+      if (!mounted) return;
+      _tick.value++;
+      _toastNewError();
     });
     WidgetsBinding.instance.ensureVisualUpdate();
-  }
-
-  void _open(_AudioPlaybackController session) {
-    if (session._closed || !identical(_session, session)) return;
-    final request = session.request;
-    unawaited(
-      widget.navigatorKey.currentState?.push<void>(
-        MaterialPageRoute<void>(
-          builder: (_) => AudioPage(
-            bookId: session._bookId,
-            title: session._title,
-            cover: session._cover,
-            chapters: session._chapters,
-            startIndex: session._index,
-            historyStore: request.historyStore,
-            playerFactory: request.playerFactory,
-            sourceLoader: request.sourceLoader,
-            voicesLoader: request.voicesLoader,
-            extrasLoader: request.extrasLoader,
-            subtitleLoader: request.subtitleLoader,
-            excerptLoader: request.excerptLoader,
-            directoryLoader: request.directoryLoader,
-          ),
-        ),
-      ),
-    );
   }
 
   @override
@@ -347,179 +585,12 @@ class _AudioPlaybackScopeState extends State<AudioPlaybackScope> {
     _tts = null;
     tts?.removeListener(_changed);
     if (tts != null) unawaited(Future<void>.microtask(tts.close));
+    _routes?.unmount();
+    _routes = null;
+    _tick.dispose();
     super.dispose();
   }
 
-  // The mini bars below are siblings of the Navigator, not descendants,
-  // so they have no Overlay ancestor for their IconButton tooltips
-  // (the Navigator owns its own Overlay internally). Wrap the column
-  // in an Overlay so the tooltips resolve to this outer Overlay, while
-  // route content still resolves to the Navigator's inner Overlay.
-  //
-  // The entry is created once: Overlay only reads initialEntries in
-  // initState, so an entry rebuilt in build() would never be inserted
-  // and its builder would stay frozen on the first build's values
-  // (mini bars never appearing). The builder below reads live state,
-  // so each scope rebuild re-renders the bars with current values.
-  late final OverlayEntry _entry = OverlayEntry(builder: _buildEntry);
-
   @override
-  Widget build(BuildContext context) {
-    return Overlay(initialEntries: [_entry]);
-  }
-
-  Widget _buildEntry(BuildContext context) {
-    final session = _session;
-    final tts = _tts;
-    final showBar =
-        session != null &&
-        !session._closed &&
-        !_views.any((v) => v._routeCurrent && identical(v._session, session));
-    return Column(
-      children: [
-        Expanded(child: widget.child),
-        if (tts != null && !tts.closed)
-          SystemTtsMiniBar(
-            session: tts,
-            onOpen: () => _openTts(tts),
-            onClose: () => unawaited(stopTts(tts)),
-          ),
-        if (showBar)
-          Material(
-            color: Theme.of(context).colorScheme.surfaceContainer,
-            child: SafeArea(
-              top: false,
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(minHeight: 64),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: InkWell(
-                        key: const ValueKey('audio-mini-open'),
-                        onTap: () => _open(session),
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 16,
-                            vertical: 8,
-                          ),
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Text(
-                                session._title,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: Theme.of(context).textTheme.titleSmall,
-                              ),
-                              Text(
-                                session._error != null
-                                    ? '播放失败，查看详情'
-                                    : session._loading
-                                    ? '正在加载…'
-                                    : session._chapters.isEmpty
-                                    ? '暂无章节'
-                                    : session._chapters[session._index].title,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: Theme.of(context).textTheme.bodySmall,
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                    const _FollowToggle(),
-                    IconButton(
-                      key: const ValueKey('audio-mini-toggle'),
-                      tooltip: session._wantPlay && !session._completed
-                          ? '暂停听书'
-                          : '继续听书',
-                      onPressed: session._ready
-                          ? session._togglePlayback
-                          : null,
-                      icon: Icon(
-                        session._wantPlay && !session._completed
-                            ? Icons.pause
-                            : Icons.play_arrow,
-                      ),
-                    ),
-                    IconButton(
-                      key: const ValueKey('audio-mini-close'),
-                      tooltip: '关闭听书',
-                      onPressed: () => unawaited(stop(session)),
-                      icon: const Icon(Icons.close),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-      ],
-    );
-  }
-}
-
-/// 迷你栏的「跟随」开关：按一次开跟随并跳到播放位置，再按一次放开自由翻页。
-///
-/// 状态存在 [ListeningSession.followArmed] 上，图标由本组件自己管 —— 迷你栏
-/// 整条由 OverlayEntry 重建，单独抽出来才不会被拖着整条一起刷。
-class _FollowToggle extends StatefulWidget {
-  const _FollowToggle();
-
-  @override
-  State<_FollowToggle> createState() => _FollowToggleState();
-}
-
-class _FollowToggleState extends State<_FollowToggle> {
-  @override
-  void initState() {
-    super.initState();
-    // 阅读页手动翻页会退出跟随，图标得跟着变回来；迷你栏挂在 Overlay 上，
-    // 只能听会话的通知。
-    ListeningSession.instance.addListener(_onSessionChanged);
-  }
-
-  @override
-  void dispose() {
-    ListeningSession.instance.removeListener(_onSessionChanged);
-    super.dispose();
-  }
-
-  void _onSessionChanged() {
-    if (mounted) setState(() {});
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final armed = ListeningSession.instance.followArmed;
-    // 处理函数由阅读页注册/注销，按钮的可点状态得跟着它走。迷你栏挂在
-    // Overlay 上、不会为这个重建，所以直接在构建里读那个 notifier：
-    // 只在真的换了函数时通知一次（同值不通知），不会变成每帧重刷。
-    return ValueListenableBuilder<void Function()?>(
-      valueListenable: ListeningSession.instance.jumpToPlaybackHandlerListenable,
-      builder: (context, handler, _) => IconButton(
-        key: const ValueKey('audio-mini-jump'),
-        // 点一次就跳到朗读处（不管之前开没开），长按才是停止跟随 ——
-        // 之前是「点一下切开关」，已经在跟随时再点只会关掉、不会重新定位，
-        // 想回到朗读处就得点两次。
-        tooltip: armed ? '跟随中，点按回到朗读处；长按停止跟随' : '点按跳到朗读处并跟随',
-        onPressed: handler == null
-            ? null
-            : () {
-                ListeningSession.instance.setFollowArmed(true);
-                handler();
-              },
-        onLongPress: armed
-            ? () => ListeningSession.instance.setFollowArmed(false)
-            : null,
-        icon: Icon(
-          armed ? Icons.gps_fixed : Icons.my_location,
-          // 跟随中染主色：一眼能看出「页面正在被朗读带着走」。
-          color: armed ? Theme.of(context).colorScheme.primary : null,
-        ),
-      ),
-    );
-  }
+  Widget build(BuildContext context) => widget.child;
 }

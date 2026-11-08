@@ -8,6 +8,10 @@ import 'home_design.dart';
 
 /// 官方书城顶栏（`res/layout/alx.xml` 的 `fua` 搜索行）。
 ///
+/// 2026-10-26 首页重做后不再逐像素对齐官方：搜索框从 36dp / 6dp 圆角改成
+/// 40dp / 20dp 的胶囊，右端「分类」入口同高同圆角。下面是官方的原尺寸，
+/// 留作对照（文案与热搜轮换仍与官方一致）。
+///
 /// 官方在这一层是一条 51dp 的搜索行：`SearchWordDisplayView`（`h21`）占
 /// 剩余宽度，左 16dp 右 16dp；右上角是「分类」入口 `i_y`（默认 gone，由
 /// AB 位 `hasCategoryTab()==false` 时打开）——14dp 分类图 + 2dp 间隔 +
@@ -20,8 +24,14 @@ import 'home_design.dart';
 /// 热搜词驱动（`SearchWordDisplayView` + `VerticalFlipper`，间隔取响应的
 /// `rotate_interval_ms`）；没有词时回退静态提示语 `@string/duw`。
 class HomeHero extends StatefulWidget {
-  static const double searchBarHeight = 36;
-  static const double searchBarRadius = 6;
+  static const double searchBarHeight = 40;
+  static const double searchBarRadius = 20;
+
+  /// 搜索行在宽屏上的最大宽度。手机与平板永远吃不满这一档，只有桌面需要
+  /// 它兜住：没有上限时窗口多宽、那条空胶囊就多宽，「分类」被挤到最右。
+  /// 1120 ≈ 默认窗口的六列书卡宽（6×186 + 5×12 ≈ 1176，取整收一点），
+  /// 左端与网格、分区头同一条 16dp 竖线。
+  static const double maxToolbarWidth = 1120;
 
   /// 官方 `@string/duw`：`SearchWordDisplayView` 的默认文案。
   static const String searchHint = '请输入书名或作者名';
@@ -98,42 +108,55 @@ class _HomeHeroState extends State<HomeHero> {
     final animate = !MediaQuery.disableAnimationsOf(context);
     return Padding(
       // 官方 fua：paddingTop 6dp / paddingBottom 9dp，左右 16dp。
-      padding: const EdgeInsets.fromLTRB(16, 6, 16, 9),
-      child: Row(
-        children: [
-          Expanded(
-            child: HomePressable(
-              key: const Key('home_search_button'),
-              onTap: widget.onSearch,
-              borderRadius: BorderRadius.circular(HomeHero.searchBarRadius),
-              semanticLabel: HomeHero.searchHint,
-              child: Container(
-                height: HomeHero.searchBarHeight,
-                padding: const EdgeInsets.only(left: 16, right: 12),
-                decoration: BoxDecoration(
-                  color: palette.searchBar,
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 10),
+      // 桌面宽窗里不再把搜索行拉满整条：2560 的窗口下一枚 2528 宽的空胶囊
+      // 只剩一条灰带，「分类」还被推到窗口最右端。工具栏收到
+      // [HomeHero.maxToolbarWidth]——约等于 6 张卡片的宽度，左端仍与网格、
+      // 分区头同一条 16dp 竖线。
+      //
+      // Align loosens the parent's width constraint before applying the cap.
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: HomeHero.maxToolbarWidth),
+          child: Row(
+            children: [
+              Expanded(
+                child: HomePressable(
+                  key: const Key('home_search_button'),
+                  onTap: widget.onSearch,
                   borderRadius: BorderRadius.circular(HomeHero.searchBarRadius),
-                ),
-                child: Row(
-                  children: [
-                    // 官方 c8：11×11dp 放大镜。
-                    Icon(
-                      LucideIcons.search,
-                      size: 11,
-                      color: palette.searchBarText,
+                  semanticLabel: HomeHero.searchHint,
+                  child: Container(
+                    height: HomeHero.searchBarHeight,
+                    padding: const EdgeInsets.only(left: 16, right: 14),
+                    decoration: BoxDecoration(
+                      color: palette.searchBar,
+                      borderRadius: BorderRadius.circular(
+                        HomeHero.searchBarRadius,
+                      ),
                     ),
-                    const SizedBox(width: 9),
-                    Expanded(child: _cueText(palette, animate)),
-                  ],
+                    child: Row(
+                      children: [
+                        Icon(
+                          LucideIcons.search,
+                          size: 15,
+                          color: palette.muted,
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(child: _cueText(palette, animate)),
+                      ],
+                    ),
+                  ),
                 ),
               ),
-            ),
+              if (widget.onCategory != null) ...[
+                const SizedBox(width: 16),
+                _categoryPill(palette),
+              ],
+            ],
           ),
-          if (widget.onCategory != null) ...[
-            const SizedBox(width: 16),
-            _categoryPill(palette),
-          ],
-        ],
+        ),
       ),
     );
   }
@@ -146,7 +169,7 @@ class _HomeHeroState extends State<HomeHero> {
       maxLines: 1,
       overflow: TextOverflow.ellipsis,
       key: ValueKey<String>(text),
-      style: TextStyle(fontSize: 14, color: palette.searchBarText),
+      style: TextStyle(fontSize: 13.5, color: palette.searchBarText),
     );
     if (!animate) return word;
     return AnimatedSwitcher(
@@ -161,7 +184,7 @@ class _HomeHeroState extends State<HomeHero> {
     );
   }
 
-  /// 官方 `i_y`：36dp 高的白色 8dp 圆角胶囊，14dp 图标 + 14sp 文案。
+  /// 搜索行右端的「分类」入口：与搜索框同高同圆角的 40dp 胶囊。
   Widget _categoryPill(HomePalette palette) {
     return GestureDetector(
       key: const Key('home_category_button'),
@@ -172,15 +195,15 @@ class _HomeHeroState extends State<HomeHero> {
         padding: const EdgeInsets.symmetric(horizontal: 10),
         decoration: BoxDecoration(
           color: palette.searchBar,
-          borderRadius: BorderRadius.circular(8),
+          borderRadius: BorderRadius.circular(HomeHero.searchBarRadius),
         ),
         child: Row(
           children: [
-            Icon(LucideIcons.layout_grid, size: 14, color: palette.ink),
-            const SizedBox(width: 2),
+            Icon(LucideIcons.layout_grid, size: 15, color: palette.ink),
+            const SizedBox(width: 5),
             Text(
               HomeHero.categoryLabel,
-              style: TextStyle(fontSize: 14, color: palette.ink),
+              style: TextStyle(fontSize: 13, color: palette.ink),
             ),
           ],
         ),

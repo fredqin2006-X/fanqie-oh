@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 
 import '../../models/book_comment.dart' show formatCount;
 import '../../models/media_item.dart';
@@ -272,7 +273,7 @@ class _PlayerSplitPanelState extends State<PlayerSplitPanel> {
                             Padding(
                               padding: const EdgeInsets.only(left: 2),
                               child: Icon(
-                                Icons.chevron_right_rounded,
+                                LucideIcons.chevron_right,
                                 size: 18,
                                 color: palette.muted,
                               ),
@@ -343,7 +344,7 @@ class _PlayerSplitPanelState extends State<PlayerSplitPanel> {
         !widget.episodeLabel.contains(status)) {
       parts.add(status);
     }
-    if (widget.episodes.isNotEmpty &&
+    if (hasCompleteEpisodeCatalogue(widget.episodes) &&
         !widget.episodeLabel.contains('${widget.episodes.length}集')) {
       parts.add('全${widget.episodes.length}集');
     }
@@ -373,7 +374,7 @@ class _PlayerSplitPanelState extends State<PlayerSplitPanel> {
           borderRadius: BorderRadius.circular(6),
         ),
         child: Icon(
-          Icons.movie_creation_outlined,
+          LucideIcons.clapperboard,
           size: 22,
           color: palette.dark ? palette.muted : const Color(0xFF9499A0),
         ),
@@ -585,6 +586,7 @@ class _PlayerSplitPanelState extends State<PlayerSplitPanel> {
   String _episodeProgress() {
     final count = widget.episodes.length;
     if (count == 0) return '';
+    if (!hasCompleteEpisodeCatalogue(widget.episodes)) return '当前视频';
     final current = widget.currentIndex.clamp(0, count - 1) + 1;
     return '第$current/$count集';
   }

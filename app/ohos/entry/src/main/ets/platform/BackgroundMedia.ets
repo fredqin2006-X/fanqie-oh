@@ -12,6 +12,7 @@ export class BackgroundMedia {
   private hasNext: boolean = false;
   private hasPrev: boolean = false;
   private owner: string | null = null;
+  private floatingOwner: number = 0;
   private title: string = '番茄OH';
   private episode: string = '';
   private cover: string = '';
@@ -27,6 +28,7 @@ export class BackgroundMedia {
     if (this.owner !== owner) {
       await this.release(); this.reset(); this.owner = owner;
     }
+    if (owner === 'floating') { this.floatingOwner = call.argument('owner') as number; }
     if (!this.session) {
       const session = await avSession.createAVSession(this.context, 'fqapp-listening', 'audio'); this.session = session;
       session.on('play', () => { if (this.session === session && !this.playing) { this.action('playPause'); } });
@@ -73,12 +75,15 @@ export class BackgroundMedia {
     finally { this.running = false; const session = this.session; this.session = null; if (session) { await session.destroy(); } }
   }
   private reset(): void {
-    this.owner = null; this.playing = false; this.hasNext = false; this.hasPrev = false;
+    this.owner = null; this.floatingOwner = 0; this.playing = false; this.hasNext = false; this.hasPrev = false;
     this.title = '番茄OH'; this.episode = ''; this.cover = ''; this.duration = 0; this.position = 0; this.speed = 1;
   }
   private action(action: string): void {
     if (this.owner === null) { return; }
-    const args = new Map<string, Object>(); args.set('action', action); this.channel.invokeMethod('onNotificationAction', args);
+    const args = new Map<string, Object>(); args.set('action', action);
+    if (this.owner === 'floating') {
+      args.set('owner', this.floatingOwner); this.channel.invokeMethod('onFloatingAction', args);
+    } else { this.channel.invokeMethod('onNotificationAction', args); }
   }
   private number(value: Object | null, min: number, max: number, fallback: number): number { return typeof value === 'number' && Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback; }
   private enqueue(task: () => Promise<void>): Promise<void> { const result = this.queue.then(task); this.queue = result.catch(() => {}); return result; }

@@ -59,6 +59,30 @@ void main() {
     );
   });
 
+  test('rank counters survive parsing and cache round-trips', () {
+    final item = MediaItem.fromRaw({
+      'book_data': {
+        'book_id': 'b1',
+        'book_name': '榜书',
+        'author': '云中客',
+        'read_count': 2860000,
+        'creation_status': 1,
+      },
+    });
+    expect(item.readCount, '2860000');
+    expect(item.creationStatus, 1);
+
+    final restored = MediaItemJson.fromJson(item.toJson())!;
+    expect(restored.readCount, '2860000');
+    expect(restored.creationStatus, 1);
+
+    // 没带字段时保持未知，不把 -1 写成 0（0 表示已完结）。
+    final unknown = MediaItem.fromRaw({'book_id': 'b2'});
+    expect(unknown.readCount, '');
+    expect(unknown.creationStatus, -1);
+    expect(unknown.toJson().containsKey('creationStatus'), isFalse);
+  });
+
   test('parses list-shaped chapterListWithVolume', () {
     final payload = {
       'code': 200,
@@ -93,6 +117,57 @@ void main() {
     final chapters = parseDirectory(payload).expand((v) => v).toList();
     expect(chapters.map((c) => c.itemId), ['v1', 'v2']);
     expect(chapters.map((c) => c.title), ['第1集', '第2集']);
+  });
+
+  test('keeps the episode vertical flag through every directory shape', () {
+    // 官方 `EpisodeInfo.vertical`：缺字段 = null，播放页仍显示「全屏观看」；
+    // 显式 true 才是竖屏，播放页隐藏该按钮。
+    final chapter = Chapter.fromRaw({'item_id': 'v1', 'vertical': true});
+    expect(chapter.vertical, isTrue);
+    expect(
+      Chapter.fromRaw({'item_id': 'v2', 'vertical': false}).vertical,
+      isFalse,
+    );
+    expect(Chapter.fromRaw({'item_id': 'v3'}).vertical, isNull);
+    expect(
+      Chapter.fromRaw({'item_id': 'v4', 'vertical': 'true'}).vertical,
+      isTrue,
+    );
+
+    final episode = Episode.fromRaw({
+      'item_id': 'e1',
+      'vertical': true,
+    }, index: 0);
+    expect(episode.vertical, isTrue);
+    expect(episode.toChapter().vertical, isTrue);
+
+    final dramas = parseDirectory({
+      'data': {
+        'episodes': [
+          {'item_id': 'e1', 'vertical': true},
+          {'item_id': 'e2', 'vertical': false},
+          {'item_id': 'e3'},
+        ],
+      },
+    }).expand((v) => v).toList();
+    expect(dramas.map((c) => c.vertical), [true, false, null]);
+
+    // `_withVersion` 的复制路径也必须带上该字段（目录的
+    // chapterListWithVolume 条目从 item_data_list 补 version）。
+    final withVersion = parseDirectory({
+      'data': {
+        'chapterListWithVolume': [
+          [
+            {'item_id': 'c1', 'title': '第1集', 'vertical': true},
+          ],
+        ],
+        'item_data_list': [
+          {'item_id': 'c1', 'version': 'v_1'},
+        ],
+      },
+    }).expand((v) => v).toList();
+    expect(withVersion.single.version, 'v_1');
+    expect(withVersion.single.vertical, isTrue);
   });
 
   test('parses a direct array directory response', () {
@@ -229,6 +304,65 @@ void main() {
       expect(restored, isNotNull);
       expect(restored!.chapters.single.version, '');
       expect(restored.chapters.single.itemId, 'c1');
+    });
+  });
+
+  group('directory episode flags', () {
+    // 「预告 / 不可播 / 新」来自 `EpisodeInfo`：目录行带同一批字段时，
+    // `Chapter.fromRaw`、`_withVersion` 与分卷归一化都不能把它们丢掉。
+    test('bridge chapters keep the flags while the version is merged', () {
+      final chapters = parseDirectory({
+        'code': 0,
+        'data': {
+          // 版本在分卷列表之外的原生目录里。
+          'item_data_list': [
+            {'item_id': 'e1', 'title': '第1集', 'version': 'v1'},
+          ],
+          'data': {
+            'chapterListWithVolume': [
+              [
+                {
+                  'itemId': 'e1',
+                  'title': '第1集',
+                  'is_preview_material': true,
+                  'disable_play': 1,
+                  'is_newly_update': true,
+                },
+              ],
+            ],
+          },
+        },
+      }).expand((volume) => volume).toList();
+      final chapter = chapters.single;
+      expect(chapter.version, 'v1');
+      expect(chapter.trailer, isTrue);
+      expect(chapter.disabled, isTrue);
+      expect(chapter.newlyUpdate, isTrue);
+    });
+
+    test('episodes keep the flags when _withVersion fills the version', () {
+      final chapters = parseDirectory({
+        'data': {
+          'episodes': [
+            {
+              'item_id': 'e1',
+              'title': '第1集',
+              'is_preview_material': true,
+              'disable_play': 1,
+              'is_newly_update': true,
+            },
+          ],
+          // `_directoryVersions` 从这里取版本，促使 _withVersion 重建 Chapter。
+          'item_data_list': [
+            {'item_id': 'e1', 'title': '第1集', 'version': 'v1'},
+          ],
+        },
+      }).expand((volume) => volume).toList();
+      final chapter = chapters.single;
+      expect(chapter.version, 'v1');
+      expect(chapter.trailer, isTrue);
+      expect(chapter.disabled, isTrue);
+      expect(chapter.newlyUpdate, isTrue);
     });
   });
 

@@ -35,25 +35,32 @@ export class SecureKeyPlugin implements FlutterPlugin, MethodCallHandler {
   }
 
   onMethodCall(call: MethodCall, result: MethodResult): void {
-    if (call.method !== 'read' && call.method !== 'write') { result.notImplemented(); return; }
+    if (!['read', 'write', 'delete'].includes(call.method)) { result.notImplemented(); return; }
     this.pending = this.pending.then(async () => {
       try {
         const context = this.context;
         if (!context) { throw new Error('SECURE_ENGINE_DETACHED'); }
         const key = call.argument('key') as string;
-        if (key !== 'fqapp_hive_encryption_key_v1' && key !== 'fqapp_device_pool_key_v1') {
+        const credential = typeof key === 'string' && /^fqapp_ai_credential_[A-Za-z0-9_-]{1,128}$/.test(key);
+        if (!credential && key !== 'fqapp_hive_encryption_key_v1' && key !== 'fqapp_device_pool_key_v1') {
           throw new Error('SECURE_KEY_NAME_INVALID');
         }
         const store = await preferences.getPreferences(context, { name: 'fqapp_secure_keys_v1' });
         if (call.method === 'read') {
           result.success(await this.read(store, key));
+        } else if (call.method === 'delete') {
+          if (!credential) { throw new Error('SECURE_REPLACEMENT_REFUSED'); }
+          await store.delete(key); await store.flush(); result.success(null);
         } else {
           const value = call.argument('value') as string;
-          if (typeof value !== 'string' || !/^[A-Za-z0-9+/]{43}=$/.test(value) ||
-            this.base64.decodeSync(value).length !== 32) { throw new Error('SECURE_VALUE_INVALID'); }
+          if (typeof value !== 'string' ||
+            (credential ? value.length < 1 || this.encoder.encodeInto(value).length > 8192 :
+              !/^[A-Za-z0-9+/]{43}=$/.test(value) || this.base64.decodeSync(value).length !== 32)) {
+            throw new Error('SECURE_VALUE_INVALID');
+          }
           const prior = await this.read(store, key);
-          if (prior !== null && prior !== value) { throw new Error('SECURE_REPLACEMENT_REFUSED'); }
-          if (prior === null) { await this.write(store, key, value); }
+          if (!credential && prior !== null && prior !== value) { throw new Error('SECURE_REPLACEMENT_REFUSED'); }
+          if (prior !== value) { await this.write(store, key, value); }
           result.success(null);
         }
       } catch (error) {
@@ -85,7 +92,11 @@ export class SecureKeyPlugin implements FlutterPlugin, MethodCallHandler {
     }
     const nonce = this.base64.decodeSync(record.nonce);
     const ciphertext = this.base64.decodeSync(record.ciphertext);
-    if (nonce.length !== 12 || ciphertext.length !== 60) { throw new Error('SECURE_RECORD_INVALID'); }
+    const credential = key.startsWith('fqapp_ai_credential_');
+    if (nonce.length !== 12 || (credential ?
+      ciphertext.length < 17 || ciphertext.length > 8208 : ciphertext.length !== 60)) {
+      throw new Error('SECURE_RECORD_INVALID');
+    }
     const params = this.parameters(huks.HuksKeyPurpose.HUKS_KEY_PURPOSE_DECRYPT, key, nonce);
     params.push({ tag: huks.HuksTag.HUKS_TAG_AE_TAG, value: ciphertext.slice(-16) });
     const plain = await this.crypt(params, ciphertext.slice(0, -16));
@@ -95,6 +106,7 @@ export class SecureKeyPlugin implements FlutterPlugin, MethodCallHandler {
 
   private async write(store: preferences.Preferences, key: string, value: string): Promise<void> {
     if (!await this.exists()) {
+      if (await store.has('fqapp_secure_root_established')) { throw new Error('SECURE_KEY_MISSING'); }
       // Never create a replacement wrapping key if either production entry exists.
       for (const purpose of ['fqapp_hive_encryption_key_v1', 'fqapp_device_pool_key_v1']) {
         if (await store.has(purpose)) { throw new Error('SECURE_KEY_MISSING'); }
@@ -111,6 +123,7 @@ export class SecureKeyPlugin implements FlutterPlugin, MethodCallHandler {
     const record: SealedKey = { version: 1, nonce: this.base64.encodeToStringSync(nonce),
       ciphertext: this.base64.encodeToStringSync(encrypted) };
     await store.put(key, JSON.stringify(record));
+    await store.put('fqapp_secure_root_established', true);
     await store.flush();
     if (await this.read(store, key) !== value) { throw new Error('SECURE_AUTH_FAILED'); }
   }

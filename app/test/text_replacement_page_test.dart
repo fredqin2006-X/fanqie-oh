@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:fqapp/pages/text_replacement_page.dart';
 import 'package:fqapp/services/text_replacement_store.dart';
+import 'package:fqapp/widgets/wenku/wenku_ui.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -56,6 +57,21 @@ void main() {
     expect(restored.snapshot.rules.single.pattern, '漂亮国');
     expect(restored.snapshot.enabled, isTrue);
   });
+  testWidgets('空规则展示 ContentNotice，启用项使用玻璃开关', (tester) async {
+    final store = TextReplacementStore();
+    await store.load();
+    await tester.pumpWidget(
+      MaterialApp(home: TextReplacementPage(store: store)),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byType(ContentNotice), findsOneWidget);
+    expect(find.text('还没有替换规则'), findsOneWidget);
+    expect(find.byType(AppGlassSwitch), findsOneWidget);
+    expect(find.byType(SwitchListTile), findsNothing);
+    expect(find.byType(Card), findsNothing);
+  });
+
   testWidgets('empty matching text is rejected without closing editor', (
     tester,
   ) async {

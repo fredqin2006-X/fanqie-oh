@@ -78,11 +78,7 @@ void main() {
     // 播放位置前进到后面几页；工具条还开着，跟随必须让位。
     _seed(positionMs: 36000, track: _track(), cue: '长句');
     await tester.pump(const Duration(milliseconds: 300));
-    expect(
-      _pager(tester).pageIndex,
-      0,
-      reason: '工具条展开时不该翻页（用户正在操作页面）',
-    );
+    expect(_pager(tester).pageIndex, 0, reason: '工具条展开时不该翻页（用户正在操作页面）');
 
     await tester.pumpWidget(const SizedBox.shrink());
   });
@@ -105,11 +101,7 @@ void main() {
     _seed(positionMs: 0, track: track, cue: '最后一段很短。');
     ListeningSession.instance.setFollowArmed(true);
     await tester.pump(const Duration(milliseconds: 250));
-    expect(
-      _pager(tester).pageIndex,
-      0,
-      reason: '位置在首句之前时不该导航，更不能挪到章末并停在那里',
-    );
+    expect(_pager(tester).pageIndex, 0, reason: '位置在首句之前时不该导航，更不能挪到章末并停在那里');
 
     await tester.pumpWidget(const SizedBox.shrink());
   });
@@ -136,16 +128,15 @@ void main() {
       layout: layout,
       track: _track(),
     ).spanAtPositionMs(36000)!;
-    expect(
-      _pager(tester).narrationRange,
-      (fallback.start, fallback.end),
-      reason: '官方时间点译不出来时应退到字幕兜底，而不是整段没有高亮',
-    );
+    expect(_pager(tester).narrationRange, (
+      fallback.start,
+      fallback.end,
+    ), reason: '官方时间点译不出来时应退到字幕兜底，而不是整段没有高亮');
 
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
-  testWidgets('官方时间点译得出来时仍是唯一来源', (tester) async {
+  testWidgets('字幕轨逐句优先，官方时间点只在没有字幕时兜底', (tester) async {
     await _mount(tester);
     final track = _track();
     _seed(
@@ -170,11 +161,10 @@ void main() {
       track: track,
     ).spanAtPositionMs(36000)!;
     expect(official.start, isNot(fallback.start), reason: '两套来源必须指向不同处');
-    expect(
-      _pager(tester).narrationRange,
-      (official.start, official.end),
-      reason: '官方区间译得出来时不能被字幕兜底顶掉',
-    );
+    expect(_pager(tester).narrationRange, (
+      fallback.start,
+      fallback.end,
+    ), reason: '有字幕轨时逐句点亮：官方时间点是段落级，整段一起亮太粗，段内句子还会漏');
 
     await tester.pumpWidget(const SizedBox.shrink());
   });
@@ -203,11 +193,7 @@ void main() {
     final target = layout.pageForOffset(span.spokenOffset(36000));
     expect(target, greaterThan(0));
     await tester.pump(const Duration(milliseconds: 250));
-    expect(
-      _pager(tester).pageIndex,
-      target,
-      reason: '点过定位键就该继续跟随，闩锁不能还挡着',
-    );
+    expect(_pager(tester).pageIndex, target, reason: '点过定位键就该继续跟随，闩锁不能还挡着');
 
     await tester.pumpWidget(const SizedBox.shrink());
   });
@@ -215,8 +201,9 @@ void main() {
   testWidgets('被闩锁挡住的跟随换章不再每 100ms 存一次进度', (tester) async {
     final store = ControlledReaderStore();
     await _mount(tester, store: store);
-    // 播放器已经读完第 1 章进到第 2 章，人还停在第 1 章里。
-    _seed(positionMs: 5000, chapterId: 'c2', track: _track(), cue: '长句');
+    // 先在第一种里起播，默认跟随把页面带到朗读处。
+    _seed(positionMs: 0, track: _track(), cue: '长句');
+    await tester.pump(const Duration(milliseconds: 150));
     // 手动翻页制造闩锁（15 秒内不跟随）。
     final rect = tester.getRect(_surface);
     await tester.tapAt(Offset(rect.left + rect.width * .9, rect.center.dy));
@@ -225,18 +212,16 @@ void main() {
     await tester.pumpAndSettle();
     expect(_lastBlock(tester), _lastParagraph, reason: '闩锁期间仍留在第 1 章');
 
-    // 再把跟随开回来：闩锁与「跟随中」同时成立，比的纯是轮询里两条分支的
-    // 先后（闩锁在换章分支之前 → 一次都不请求；在后面 → 每 100ms 请求一次）。
+    // 播放器已经读完第 1 章进到第 2 章；把跟随开回来（手动翻页后已关掉，
+    // 这里不再经过「起播」那条自动路径，闩锁不会因此被清）。
+    _seed(positionMs: 5000, chapterId: 'c2', track: _track(), cue: '长句');
     ListeningSession.instance.setFollowArmed(true);
+    expect(ListeningSession.instance.followArmed, isTrue);
     await tester.pump(const Duration(milliseconds: 600)); // 等防抖存盘落完
     final before = store.writes.length;
 
     await tester.pump(const Duration(milliseconds: 1000));
-    expect(
-      store.writes.length,
-      before,
-      reason: '闩锁期间的换章请求一次都不该落地，更不该每秒存十次进度',
-    );
+    expect(store.writes.length, before, reason: '闩锁期间的换章请求一次都不该落地，更不该每秒存十次进度');
     expect(
       _lastBlock(tester),
       _lastParagraph,
@@ -252,11 +237,9 @@ void main() {
     ListeningSession.instance.setFollowArmed(true);
     await tester.pump(const Duration(milliseconds: 150));
 
-    // 打开工具条 → 展开「设置」里的章节行 → 点「下一章」→ 收起工具条。
+    // 打开工具条 → 点常驻章节行的「下一章」→ 收起工具条。
     await tester.tapAt(tester.getRect(_surface).center);
     await tester.pump(const Duration(milliseconds: 400));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('reader-settings')));
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('下一章'));
     await tester.pumpAndSettle();
@@ -295,6 +278,76 @@ void main() {
 
     await tester.pumpWidget(const SizedBox.shrink());
   });
+
+  testWidgets('后台起播的会话在回到前台后开始跟随', (tester) async {
+    await _mount(tester);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    await tester.pump();
+    _seed(positionMs: 36000, track: _track(), cue: '长句');
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(_pager(tester).pageIndex, 0, reason: '后台不该轮询翻页');
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump(const Duration(milliseconds: 150));
+    expect(
+      _pager(tester).pageIndex,
+      greaterThan(0),
+      reason: '回到前台后应重新启动轮询并跟上朗读处',
+    );
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('跟随滚动模式按固定周期落盘进度', (tester) async {
+    SharedPreferences.setMockInitialValues({'reader_page_mode': 'scroll'});
+    final store = ControlledReaderStore();
+    await _mount(tester, store: store);
+    // 起播：默认跟随，轮询把页面挪到朗读处。
+    _seed(positionMs: 0, track: _track(), cue: '长句');
+    await tester.pump(const Duration(milliseconds: 150));
+    // 等一次「像是滚动停下」的 500ms 防抖有机会落完，再取基线。
+    await tester.pump(const Duration(milliseconds: 700));
+    final before = store.writes.length;
+
+    // 播放位置持续推进：页面每 100ms 被程序化跳转一次，滚动防抖被不断重置。
+    for (var i = 1; i <= 12; i++) {
+      _seed(positionMs: i * 3000, track: _track(), cue: '长句');
+      await tester.pump(const Duration(milliseconds: 250));
+    }
+    expect(
+      store.writes.length,
+      greaterThan(before),
+      reason: '跟随期间滚动防抖永远等不到，必须按固定周期补存',
+    );
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+  testWidgets('自然播放跨到下一句时先多留上一句，越界才切', (tester) async {
+    await _mount(tester);
+    final track = SubtitleTrack([
+      SubtitleCue(startMs: 0, text: _firstCue),
+      SubtitleCue(startMs: 5000, text: _secondCue),
+    ]);
+    // 直接摆到上一句末尾：这一句 20 字会拆片，句尾亮的是**最后一片**。
+    // 首次 update 是结构性变化（bookId 从 null 变成 b1），通知不会被 1s 节流吞掉。
+    _seed(positionMs: 4600, track: track, cue: _firstCue);
+    await tester.pump(const Duration(milliseconds: 150));
+    final tail = _pager(tester).narrationRange;
+    expect(tail, isNotNull, reason: '上一句尾部应当亮着');
+
+    // 位置进到下一句起点（含 70ms 提前量），仍在 200ms 保持窗内：留在上一句。
+    _seed(positionMs: 5000, track: track, cue: _secondCue);
+    await tester.pump(const Duration(milliseconds: 150));
+    expect(
+      _pager(tester).narrationRange,
+      tail,
+      reason: '保持窗内不能提前切走，否则句尾最后几个字只亮一瞬',
+    );
+
+    // 「越过窗口之后会切走」由 cue_index_test 的跨 cue 保持用例按纯索引验证
+    // （那里不受 1s 通知节流影响），这里只钉「保持窗内不能提前切」。
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 }
 
 final _surface = find.byKey(const ValueKey('reader-page-surface'));
@@ -313,6 +366,10 @@ const _sentence = '清晨的风从窗边吹来，带着山间草木的清香。�
 String _longParagraph() => List.generate(40, (_) => _sentence).join();
 
 const _lastParagraph = '最后一段很短。';
+
+/// 自然播放跨 cue 保持用例用的两句：第一句 21 字（会拆片），第二句紧随其后。
+const _firstCue = '清晨的风从窗边吹来，带着山间草木的清香。';
+const _secondCue = '林舟推开木窗，看见远处的云正慢慢越过山脊。';
 
 SubtitleTrack _track() => SubtitleTrack([
   SubtitleCue(startMs: 0, text: _longParagraph().substring(0, 1200)),

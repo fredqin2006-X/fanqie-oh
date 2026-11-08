@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/physics.dart';
 
+import '../../services/app_style_tokens.dart';
 import '../../services/app_theme.dart';
+import '../../services/app_theme_style.dart';
 
-/// The home surface keeps its warm paper / tomato identity in both themes.
+/// Home colours follow the inherited presentation, with device modes first.
 class HomePalette {
   static const accent = Color(0xFFEF5038);
   static const accentStrong = Color(0xFFC73D29);
@@ -17,50 +19,81 @@ class HomePalette {
   /// 只在深色外观下生效（见 [oledActive]），这里的 `&& dark` 是二重保险。
   final bool oled;
 
-  const HomePalette(this.dark, {this.eink = false, this.oled = false});
+  /// Direct callers retain the archive palette unless they opt into classic.
+  final AppThemeStyle style;
+  bool get isClassic => style == AppThemeStyle.classic;
+
+  const HomePalette(
+    this.dark, {
+    this.eink = false,
+    this.oled = false,
+    this.style = AppThemeStyle.archive,
+  });
 
   factory HomePalette.of(BuildContext context) => HomePalette(
     Theme.of(context).brightness == Brightness.dark,
     eink: einkModeNotifier.value,
     oled: oledActive(),
+    style: AppStyleTokens.of(context).style,
   );
 
-  /// 官方书城底色 `skin_color_F6F6F6_light`（#F6F6F6），见 res/layout/alx.xml
-  /// 根 FrameLayout。此前是暖纸色 #FCFAF7，与官方不一致。
+  /// 档案纸：2026-11 首页重构后画布取奶白 #F4F3EF，卡面 #FDFCFA。
   ///
   /// OLED 纯黑只在深色下多出一档：画布给纯黑省电，卡片 / 弹层退回近黑。
   /// 写成逐层判断而非嵌套三元，三个候选一眼能数清。
   Color get canvas {
     if (eink) return Colors.white;
     if (oled && dark) return Colors.black;
-    return dark ? const Color(0xFF151517) : const Color(0xFFF6F6F6);
+    if (isClassic) {
+      return dark ? const Color(0xFF151517) : const Color(0xFFF6F6F6);
+    }
+    return dark ? const Color(0xFF191919) : const Color(0xFFF4F3EF);
   }
 
   Color get surface {
     if (eink) return Colors.white;
     if (oled && dark) return const Color(0xFF0C0C0E);
-    return dark ? const Color(0xFF242427) : Colors.white;
+    if (isClassic) return dark ? const Color(0xFF242427) : Colors.white;
+    return dark ? const Color(0xFF242424) : const Color(0xFFFDFCFA);
   }
 
   Color get ink => eink
       ? Colors.black
-      : (dark ? const Color(0xFFF5F1EB) : const Color(0xFF262522));
+      : isClassic
+      ? (dark ? const Color(0xFFF5F1EB) : const Color(0xFF262522))
+      : (dark ? const Color(0xFFF2F2F2) : const Color(0xFF1C1C1B));
   Color get muted => eink
       ? Colors.black
-      : (dark ? const Color(0xFFA7A39E) : const Color(0xFF706C66));
+      : isClassic
+      ? (dark ? const Color(0xFFA7A39E) : const Color(0xFF706C66))
+      : (dark ? const Color(0xFFB7B7B7) : const Color(0xFF6E6D68));
   Color get accentText => eink ? Colors.black : (dark ? accent : accentStrong);
 
   Color get soft {
     if (eink) return Colors.white;
     if (oled && dark) return const Color(0xFF141417);
-    return dark ? const Color(0xFF202023) : const Color(0xFFF1EEE9);
+    if (isClassic) {
+      return dark ? const Color(0xFF202023) : const Color(0xFFF1EEE9);
+    }
+    return dark ? const Color(0xFF2D2D2D) : const Color(0xFFECE9E2);
   }
 
   Color get line {
     if (eink) return Colors.black;
     if (oled && dark) return const Color(0xFF2E2E34);
-    return dark ? const Color(0xFF333336) : const Color(0xFFE8E4DE);
+    if (isClassic) {
+      return dark ? const Color(0xFF333336) : const Color(0xFFE8E4DE);
+    }
+    return dark ? const Color(0xFF3C3C3C) : const Color(0xFFE1DFD8);
   }
+
+  /// 书架背景的方格纸。浅色是极淡的黑格，深色是极淡的白格，墨水屏不画。
+  Color get grid => eink || isClassic
+      ? Colors.transparent
+      : (dark ? const Color(0x06FFFFFF) : const Color(0x06000000));
+
+  /// 细线之上的定位方块：分区标签、选中态都用它。
+  Color get mark => eink ? Colors.black : ink;
 
   /// 官方搜索框底色 `skin_color_search_bar_bg_v2_light` = #FFFFFF
   /// （res/values/colors.xml），暗色下用 surface。
@@ -137,7 +170,7 @@ class _HomePressableState extends State<HomePressable>
   late final _scale = AnimationController.unbounded(vsync: this, value: 1);
 
   void _press(bool pressed) {
-    if (MediaQuery.disableAnimationsOf(context)) {
+    if (einkModeNotifier.value || MediaQuery.disableAnimationsOf(context)) {
       _scale.stop();
       _scale.value = 1;
       return;

@@ -14,6 +14,7 @@ import 'package:fqapp/widgets/reader/reader_chapter_layout.dart';
 import 'package:fqapp/widgets/reader/reader_paged_view.dart';
 
 import 'support/fakes.dart';
+import 'support/reader_settings_nav.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -346,6 +347,8 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('reader-page-surface')));
       await tester.pumpAndSettle();
       await _openSettings(tester);
+      // 自动翻页在「翻页」分类里。
+      await openReaderSettingsCategory(tester, 'turn');
       await tester.tap(find.byKey(const ValueKey('reader-auto-turn')));
       await tester.pumpAndSettle();
       final first = pageNumber();
@@ -379,10 +382,14 @@ ReaderChapterLayout _layout() => ReaderChapterLayout(
   ),
 );
 
-/// Expands the 设置 section of the reading menu. The section keeps its state
-/// across chapter changes, so this is a no-op while it is already open.
+/// 从阅读菜单的「外观」直接打开阅读设置面板。
 Future<void> _openSettings(WidgetTester tester) async {
-  if (find.byTooltip('上一章').evaluate().isNotEmpty) return;
+  if (find
+      .byKey(const ValueKey('reader-settings-close'))
+      .evaluate()
+      .isNotEmpty) {
+    return;
+  }
   await tester.tap(find.byKey(const ValueKey('reader-settings')));
   await tester.pumpAndSettle();
 }

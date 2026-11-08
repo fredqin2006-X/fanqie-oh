@@ -1,13 +1,32 @@
+// Upstream source: Wenku8_Flutter rev ebcd7f1
+//   lib/updates/update_page.dart (AppUpdatePage: ArchiveFeaturePage shell,
+//     ArchiveSection title block, ContentPanel rows, GlassTextButton)
+//   lib/feature_pages.dart (FeatureEntry/featurePadding vocabulary)
+// Mechanical substitutions:
+// - fqapp has no update service or account module: the version line stays the
+//   static `AboutPage.versionText` (never bumped here), update checking links
+//   to the GitHub release page, and the open-source licence entry keeps
+//   `showLicensePage` with the Wenku8 notices registered by
+//   `lib/services/third_party_licenses.dart` (assets/licenses/wenku8).
+// - `SettingsGroupCard`/`SettingsRow` are replaced by the archive
+//   `ContentPanel` + an upstream-styled row. The sponsor card and the WeChat
+//   reward dialog are fqapp-only and remain unchanged.
+// - Logo plate / heading / intro copy are preserved so the existing About
+//   contract (version copy, licence route, e-ink shadow) is unchanged.
 import 'dart:async';
 
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../widgets/home/home_design.dart';
+import '../widgets/settings/settings_widgets.dart';
+import '../widgets/wenku/wenku_ui.dart';
 
-/// About page styled after PiliPlus: centered logo/name header, a short
-/// intro paragraph, then grouped card rows (version, updates, licenses,
+/// About page in the Wenku8 archive shell: centered logo/name header, a short
+/// intro paragraph, then archive panel rows (version, updates, licenses,
 /// source code, feedback, ...).
 class AboutPage extends StatelessWidget {
   const AboutPage({super.key});
@@ -33,14 +52,15 @@ class AboutPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final outline = theme.colorScheme.outline;
     final palette = HomePalette.of(context);
+    final scheme = theme.colorScheme;
 
-    return Scaffold(
-      backgroundColor: palette.canvas,
-      appBar: AppBar(title: const Text('关于'), centerTitle: true),
-      body: ListView(
-        padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
+    return ArchiveFeaturePage(
+      title: '关于',
+      code: 'SYSTEM / ABOUT',
+      child: ListView(
+        key: const ValueKey('about-scroll'),
+        padding: featurePadding(context),
         children: [
           const _AboutLogo(),
           const SizedBox(height: 12),
@@ -50,20 +70,91 @@ class AboutPage extends StatelessWidget {
             '番茄OH把小说、短剧、漫剧、漫画和听书聚到一起。'
             '所有签名与解密都在你的手机本地完成，不依赖第三方服务。',
             style: theme.textTheme.bodyMedium?.copyWith(
-              color: outline,
-              height: 1.55,
+              color: scheme.onSurfaceVariant,
+              height: 1.7,
             ),
           ),
-          const SizedBox(height: 12),
-          const _AboutInfoCard(),
-          const SizedBox(height: 12),
+          const SizedBox(height: 24),
+          const ArchiveSection(title: '应用信息', code: 'FQAPP / ABOUT'),
+          const SizedBox(height: 14),
+          ContentPanel(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _InfoRow(
+                  icon: LucideIcons.badge_check,
+                  title: '当前版本',
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        versionText,
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Icon(
+                        LucideIcons.copy,
+                        size: 15,
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ],
+                  ),
+                  onTap: () => _copyVersion(context),
+                ),
+                _InfoRow(
+                  icon: LucideIcons.square_arrow_out_up_right,
+                  title: '检查更新',
+                  subtitle: '前往 GitHub 发布页查看新版本',
+                  onTap: () => _launchExternalUrl(
+                    context,
+                    'https://github.com/fredqin2006-X/fanqie-oh/releases',
+                  ),
+                ),
+                _InfoRow(
+                  icon: LucideIcons.scale,
+                  title: '开源许可',
+                  subtitle: 'GPL-3.0 与第三方组件许可',
+                  onTap: () => showLicensePage(
+                    context: context,
+                    applicationName: '番茄OH',
+                    applicationVersion: versionText,
+                    applicationLegalese:
+                        '番茄OH基于 fqapp 移植，遵循 GPL-3.0 协议，第三方组件遵循其各自的许可协议。'
+                        'Wenku8 Flutter 界面来源与许可文本见 assets/licenses/wenku8。',
+                  ),
+                ),
+                _InfoRow(
+                  icon: LucideIcons.code_xml,
+                  title: '源代码',
+                  subtitle: 'github.com/fredqin2006-X/fanqie-oh',
+                  onTap: () => _launchExternalUrl(
+                    context,
+                    'https://github.com/fredqin2006-X/fanqie-oh',
+                  ),
+                ),
+                _InfoRow(
+                  icon: LucideIcons.message_square,
+                  title: '问题反馈',
+                  subtitle: '前往 GitHub Issues 提交',
+                  onTap: () => _launchExternalUrl(
+                    context,
+                    'https://github.com/fredqin2006-X/fanqie-oh/issues',
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 20),
           const _SupportCard(),
           const SizedBox(height: 24),
           Center(
             child: Text(
               '仅限个人学习研究使用\n请遵守相关法律法规',
               textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 12, color: outline, height: 1.5),
+              style: TextStyle(fontSize: 12, color: palette.muted, height: 1.5),
             ),
           ),
           const SizedBox(height: 8),
@@ -82,13 +173,11 @@ class AboutPage extends StatelessWidget {
 
   /// 微信赞赏码弹窗：大图 + 一句扫码提示，点遮罩或「关闭」退出。
   static Future<void> _showWechatReward(BuildContext context) {
-    final theme = Theme.of(context);
+    final palette = HomePalette.of(context);
     return showDialog<void>(
       context: context,
       builder: (context) => Dialog(
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
-        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         child: Padding(
           padding: const EdgeInsets.fromLTRB(20, 20, 20, 8),
           child: Column(
@@ -106,9 +195,7 @@ class AboutPage extends StatelessWidget {
               const SizedBox(height: 12),
               Text(
                 '微信扫一扫，赞赏上游作者',
-                style: theme.textTheme.bodyMedium?.copyWith(
-                  color: theme.colorScheme.outline,
-                ),
+                style: TextStyle(fontSize: 14, color: palette.muted),
               ),
               Align(
                 alignment: Alignment.centerRight,
@@ -125,25 +212,97 @@ class AboutPage extends StatelessWidget {
   }
 }
 
+/// Archive-style information row: leading icon, title/subtitle and an optional
+/// trailing value. The whole row is the tap target.
+class _InfoRow extends StatelessWidget {
+  const _InfoRow({
+    required this.icon,
+    required this.title,
+    this.subtitle,
+    this.trailing,
+    this.onTap,
+  });
+
+  final IconData icon;
+  final String title;
+  final String? subtitle;
+  final Widget? trailing;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final content = Padding(
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      child: Row(
+        children: [
+          ArchiveIcon(icon, size: 21),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                AppText(
+                  title,
+                  style: const TextStyle(fontWeight: FontWeight.w600),
+                ),
+                if (subtitle != null) ...[
+                  const SizedBox(height: 5),
+                  AppText(
+                    subtitle!,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          if (trailing != null) ...[const SizedBox(width: 8), trailing!],
+          if (onTap != null) ...[
+            const SizedBox(width: 8),
+            const ArchiveIcon(CupertinoIcons.chevron_right, size: 14),
+          ],
+        ],
+      ),
+    );
+    if (onTap == null) return content;
+    return Semantics(
+      button: true,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(4),
+        onTap: onTap,
+        child: content,
+      ),
+    );
+  }
+}
+
 /// 头部 logo：全幅图片，圆角与投影跟随图版的 15% 板式圆角。
 class _AboutLogo extends StatelessWidget {
   const _AboutLogo();
 
   @override
   Widget build(BuildContext context) {
+    final palette = HomePalette.of(context);
     return Center(
       // The bundled logo is full-bleed; 12 of 80 keeps the plate's 15%
       // corner radius so the image and the shadow outline agree.
       child: Container(
+        key: const ValueKey('about-logo-plate'),
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(12),
-          boxShadow: [
-            BoxShadow(
-              color: HomePalette.accent.withValues(alpha: 0.20),
-              blurRadius: 18,
-              offset: const Offset(0, 6),
-            ),
-          ],
+          // 墨水屏没有彩色投影可投；留一圈阴影只会糊成一团黑。
+          boxShadow: palette.eink
+              ? null
+              : [
+                  BoxShadow(
+                    color: palette.accentText.withValues(alpha: 0.20),
+                    blurRadius: 18,
+                    offset: const Offset(0, 6),
+                  ),
+                ],
         ),
         child: ClipRRect(
           borderRadius: BorderRadius.circular(12),
@@ -172,175 +331,27 @@ class _AboutHeading extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
+    final scheme = Theme.of(context).colorScheme;
     return Column(
       children: [
-        Text(
+        AppText(
           '番茄OH',
           textAlign: TextAlign.center,
-          style: theme.textTheme.titleLarge?.copyWith(
+          style: TextStyle(
+            fontSize: 22,
+            height: 1.25,
             fontWeight: FontWeight.bold,
             letterSpacing: -0.3,
+            color: scheme.onSurface,
           ),
         ),
         const SizedBox(height: 6),
-        Text(
+        AppText(
           '小说 / 短剧 / 漫剧 / 漫画 / 听书聚合客户端',
           textAlign: TextAlign.center,
-          style: TextStyle(color: theme.colorScheme.outline, fontSize: 13),
+          style: TextStyle(color: scheme.onSurfaceVariant, fontSize: 13),
         ),
       ],
-    );
-  }
-}
-
-/// 信息卡：版本（点按复制）、检查更新、开源许可、源码与反馈。
-class _AboutInfoCard extends StatelessWidget {
-  const _AboutInfoCard();
-
-  @override
-  Widget build(BuildContext context) {
-    return _AboutCard(
-      children: [
-        _AboutRow(
-          icon: Icons.commit_outlined,
-          title: '当前版本',
-          trailingText: AboutPage.versionText,
-          showCopyGlyph: true,
-          onTap: () => AboutPage._copyVersion(context),
-        ),
-        const Divider(height: 1, indent: 68),
-        const _AboutRow(
-          icon: Icons.system_update_alt,
-          title: '检查更新',
-          subtitle: '前往 GitHub 发布页查看新版本',
-          url: 'https://github.com/fredqin2006-X/fanqie-oh/releases',
-        ),
-        const Divider(height: 1, indent: 68),
-        _AboutRow(
-          icon: Icons.balance,
-          title: '开源许可',
-          subtitle: 'GPL-3.0 与第三方组件许可',
-          onTap: () => showLicensePage(
-            context: context,
-            applicationName: '番茄OH',
-            applicationVersion: AboutPage.versionText,
-            applicationLegalese:
-                '番茄OH基于 ch6vip/fqapp 移植，遵循 GPL-3.0；第三方组件遵循其各自许可。',
-          ),
-        ),
-        const Divider(height: 1, indent: 68),
-        const _AboutRow(
-          icon: Icons.code,
-          title: 'Source Code',
-          subtitle: 'github.com/fredqin2006-X/fanqie-oh',
-          url: 'https://github.com/fredqin2006-X/fanqie-oh',
-        ),
-        const Divider(height: 1, indent: 68),
-        const _AboutRow(
-          icon: Icons.feedback_outlined,
-          title: '问题反馈',
-          subtitle: '前往 GitHub Issues 提交',
-          url: 'https://github.com/fredqin2006-X/fanqie-oh/issues',
-        ),
-        const Divider(height: 1, indent: 68),
-        const _AboutRow(
-          icon: Icons.favorite_border,
-          title: '上游项目',
-          subtitle: 'ch6vip/fqapp',
-          url: 'https://github.com/ch6vip/fqapp',
-        ),
-      ],
-    );
-  }
-}
-
-class _AboutCard extends StatelessWidget {
-  final List<Widget> children;
-  const _AboutCard({required this.children});
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Card(
-      // 横向间距由页面 ListView 的 padding 统一承担，卡片自身不再带 margin，
-      // 卡间节奏只靠外层 SizedBox 一套控制。
-      margin: EdgeInsets.zero,
-      elevation: 0,
-      color: theme.colorScheme.surface,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-        side: BorderSide(color: theme.colorScheme.outlineVariant, width: 0.6),
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: Column(children: children),
-    );
-  }
-}
-
-class _AboutRow extends StatelessWidget {
-  final IconData icon;
-  final String title;
-  final String? subtitle;
-  final String? trailingText;
-  final bool showCopyGlyph;
-  final String? url;
-  final VoidCallback? onTap;
-
-  const _AboutRow({
-    required this.icon,
-    required this.title,
-    this.subtitle,
-    this.trailingText,
-    this.showCopyGlyph = false,
-    this.url,
-    this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final outline = theme.colorScheme.outline;
-    final tappable = onTap != null || url != null;
-    return ListTile(
-      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-      onTap: onTap ?? (url == null ? null : () => _launchExternalUrl(context, url!)),
-      leading: Container(
-        width: 38,
-        height: 38,
-        decoration: BoxDecoration(
-          color: theme.colorScheme.primary.withValues(alpha: 0.12),
-          borderRadius: BorderRadius.circular(10),
-        ),
-        child: Icon(icon, size: 20, color: theme.colorScheme.primary),
-      ),
-      title: Text(
-        title,
-        style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15),
-      ),
-      subtitle: subtitle == null
-          ? null
-          : Text(
-              subtitle!,
-              style: theme.textTheme.labelMedium?.copyWith(color: outline),
-            ),
-      trailing: trailingText != null
-          ? Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  trailingText!,
-                  style: TextStyle(fontSize: 13, color: outline),
-                ),
-                if (showCopyGlyph) ...[
-                  const SizedBox(width: 6),
-                  Icon(Icons.content_copy, size: 15, color: outline),
-                ],
-              ],
-            )
-          : tappable
-          ? Icon(Icons.arrow_forward, size: 16, color: outline)
-          : null,
     );
   }
 }
@@ -383,15 +394,13 @@ class _SupportCard extends StatelessWidget {
       alpha: palette.eink ? 0.06 : (palette.dark ? 0.20 : 0.10),
     );
 
-    return Card(
-      margin: EdgeInsets.zero,
-      elevation: 0,
+    return Material(
       color: tint,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-        side: BorderSide(color: brand.withValues(alpha: 0.35), width: 0.8),
-      ),
       clipBehavior: Clip.antiAlias,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(SettingsGroupCard.radius),
+        side: BorderSide(color: brand.withValues(alpha: 0.35), width: 0.6),
+      ),
       child: Padding(
         padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
         child: Column(
@@ -403,7 +412,7 @@ class _SupportCard extends StatelessWidget {
               width: double.infinity,
               child: FilledButton.icon(
                 onPressed: () => _launchExternalUrl(context, _sponsorUrl),
-                icon: const Icon(Icons.favorite, size: 18),
+                icon: const Icon(LucideIcons.heart, size: 18),
                 label: const Text('前往爱发电'),
                 style: FilledButton.styleFrom(
                   backgroundColor: brand,
@@ -420,7 +429,7 @@ class _SupportCard extends StatelessWidget {
               width: double.infinity,
               child: OutlinedButton.icon(
                 onPressed: () => AboutPage._showWechatReward(context),
-                icon: const Icon(Icons.qr_code_2, size: 18),
+                icon: const Icon(LucideIcons.qr_code, size: 18),
                 label: const Text('微信赞赏'),
                 style: OutlinedButton.styleFrom(
                   foregroundColor: brand,
@@ -448,7 +457,7 @@ class _SupportHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
+    final scheme = Theme.of(context).colorScheme;
     return Row(
       children: [
         Container(
@@ -458,22 +467,27 @@ class _SupportHeader extends StatelessWidget {
             color: brand,
             borderRadius: BorderRadius.circular(10),
           ),
-          child: Icon(Icons.volunteer_activism, size: 20, color: onBrand),
+          child: Icon(LucideIcons.hand_heart, size: 20, color: onBrand),
         ),
         const SizedBox(width: 12),
         Expanded(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text(
+              Text(
                 '支持上游作者',
-                style: TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
+                style: TextStyle(
+                  fontWeight: FontWeight.w600,
+                  fontSize: 15,
+                  color: scheme.onSurface,
+                ),
               ),
               const SizedBox(height: 2),
               Text(
                 '如果这个项目对你有帮助，欢迎在爱发电支持上游作者',
-                style: theme.textTheme.labelMedium?.copyWith(
-                  color: theme.colorScheme.outline,
+                style: TextStyle(
+                  fontSize: 12.5,
+                  color: scheme.onSurfaceVariant,
                 ),
               ),
             ],

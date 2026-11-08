@@ -38,6 +38,14 @@ class MediaItem {
   final String ep;
   final String kind; // 'book' | 'video' | 'manju' | 'manga' | 'audio'
 
+  /// 榜单条目自带的在读人数，可能是裸数字（`"12345"`）或现成文案
+  /// （`"286万人在读"`）。空串表示未知。
+  final String readCount;
+
+  /// 连载状态，沿用上游 `creation_status`：0=完结、1=连载中、4=停更；
+  /// -1 表示条目没带这个字段（非榜单来源通常都是 -1）。
+  final int creationStatus;
+
   /// Novel length (`word_number`) from the search card's `book_data`.
   /// Zero when the card carries none, which is normal for non-novel kinds.
   final int wordNumber;
@@ -86,6 +94,13 @@ class MediaItem {
   /// 「观看全集·N集」 from the episode count, so this is informational.
   final String episodeListText;
 
+  /// 数据源标识：`fanqie`（默认）或 `shuqi`。
+  ///
+  /// 书旗的 bookId 与番茄同为纯数字，光看 id 无法区分来源，所以来源必须随条目
+  /// 一起传递；否则点击书旗结果会被送到番茄详情页去查一本不存在的书。
+  /// 见 `models/shuqi_book.dart` 的 `shuqiSourceId`。
+  final String source;
+
   MediaItem({
     required this.id,
     required this.title,
@@ -94,6 +109,8 @@ class MediaItem {
     required this.badge,
     required this.ep,
     required this.kind,
+    this.readCount = '',
+    this.creationStatus = -1,
     this.wordNumber = 0,
     this.score,
     this.tag,
@@ -106,6 +123,7 @@ class MediaItem {
     this.recTags = const [],
     this.episodeListText = '',
     this.aiGenerated = false,
+    this.source = 'fanqie',
   });
 
   /// Copy with selected fields replaced.
@@ -124,6 +142,8 @@ class MediaItem {
     String? badge,
     String? ep,
     String? kind,
+    String? readCount,
+    int? creationStatus,
     int? wordNumber,
     double? score,
     MediaTag? tag,
@@ -136,6 +156,7 @@ class MediaItem {
     List<MediaRecTag>? recTags,
     String? episodeListText,
     bool? aiGenerated,
+    String? source,
   }) => MediaItem(
     id: id ?? this.id,
     title: title ?? this.title,
@@ -144,6 +165,8 @@ class MediaItem {
     badge: badge ?? this.badge,
     ep: ep ?? this.ep,
     kind: kind ?? this.kind,
+    readCount: readCount ?? this.readCount,
+    creationStatus: creationStatus ?? this.creationStatus,
     wordNumber: wordNumber ?? this.wordNumber,
     score: score ?? this.score,
     tag: tag ?? this.tag,
@@ -156,6 +179,7 @@ class MediaItem {
     recTags: recTags ?? this.recTags,
     episodeListText: episodeListText ?? this.episodeListText,
     aiGenerated: aiGenerated ?? this.aiGenerated,
+    source: source ?? this.source,
   );
 
   factory MediaItem.fromRaw(Map<String, dynamic> item) {
@@ -337,6 +361,12 @@ class MediaItem {
           _firstString(bd, ['series_intro', 'intro', 'abstract']) ??
           '',
       followerCount: followedCount,
+      readCount:
+          _firstString(bd, ['read_count']) ??
+          _firstString(item, ['read_count']) ??
+          '',
+      creationStatus:
+          _asInt(bd['creation_status'] ?? item['creation_status']) ?? -1,
       categories: categories,
       rankTags: rankTags,
       recTags: recTags,
@@ -683,6 +713,18 @@ class Chapter {
   final bool disabled;
   final bool newlyUpdate;
 
+  /// 服务端分集方向（官方 `EpisodeInfo.vertical` / `VideoInfo.vertical`）。
+  ///
+  /// 播放页「全屏观看」只在 `!isVertical()` 时出现（`wp3/o1.java:301-347`）。
+  /// `null` = 回包没有该字段（旧缓存/离线）：与官方一致按「不竖屏」处理，
+  /// 保留按钮。官方字段是 primitive `boolean`，Gson 缺字段即为 false，
+  /// 所以这里的 null 与 false 在展示上等价，但保留 null 让「未知」可区分。
+  final bool? vertical;
+
+  /// False for a playable video supplied without its series catalogue. Its
+  /// position in a fallback list must not become a global episode number.
+  final bool hasKnownIndex;
+
   Chapter({
     required this.itemId,
     required this.title,
@@ -692,6 +734,8 @@ class Chapter {
     this.highlight = false,
     this.disabled = false,
     this.newlyUpdate = false,
+    this.vertical,
+    this.hasKnownIndex = true,
   });
 
   factory Chapter.fromRaw(Map<String, dynamic> m, {int? index}) => Chapter(
@@ -699,8 +743,24 @@ class Chapter {
     title: _entryTitle(m, index: index),
     volumeName: (m['volume_name'] ?? m['volumeName'] ?? '').toString(),
     version: (m['version'] ?? '').toString(),
+    // 目录行可能带同一批官方选集字段（见 [Episode.fromRaw]）。不在这里
+    // 读出来，`_withVersion` 和分卷归一化重建 Chapter 时「预告 / 不可播 /
+    // 新」角标就全没了。
+    trailer: _flag(m, const [
+      'is_preview_material',
+      'isPreviewMaterial',
+      'is_trailer',
+    ]),
+    disabled:
+        _flag(m, const ['disable_play', 'disablePlay']) ||
+        (_asInt(m['item_status']) ?? 0) != 0,
+    newlyUpdate: _flag(m, const ['is_newly_update', 'isNewlyUpdate']),
+    vertical: _optionalFlag(m, const ['vertical']),
   );
 }
+
+bool hasCompleteEpisodeCatalogue(List<Chapter> episodes) =>
+    episodes.isNotEmpty && episodes.every((episode) => episode.hasKnownIndex);
 
 /// Explicit short-drama model used by the player and directory parser.
 class Episode {
@@ -713,6 +773,9 @@ class Episode {
   final bool disabled;
   final bool newlyUpdate;
 
+  /// 服务端分集方向（官方 `EpisodeInfo.vertical`）。见 [Chapter.vertical]。
+  final bool? vertical;
+
   Episode({
     required this.itemId,
     required this.title,
@@ -722,6 +785,7 @@ class Episode {
     this.highlight = false,
     this.disabled = false,
     this.newlyUpdate = false,
+    this.vertical,
   });
 
   factory Episode.fromRaw(Map<String, dynamic> m, {int index = 0}) => Episode(
@@ -750,6 +814,9 @@ class Episode {
     // 官方 `EpisodeInfo.is_newly_update`（`th3/e.java:133` 映射到
     // `SaasVideoData.isNewlyUpdate`，选集格子的「新」角标就看它）。
     newlyUpdate: _flag(m, const ['is_newly_update', 'isNewlyUpdate']),
+    // 官方 `EpisodeInfo.vertical`（`th3/e.java:95`）原样透传；
+    // 缺字段为 null，播放页据此保持「显示全屏观看」的旧行为。
+    vertical: _optionalFlag(m, const ['vertical']),
   );
 
   Chapter toChapter() => Chapter(
@@ -760,6 +827,7 @@ class Episode {
     highlight: highlight,
     disabled: disabled,
     newlyUpdate: newlyUpdate,
+    vertical: vertical,
   );
 }
 
@@ -824,6 +892,12 @@ List<List<Chapter>> parseDirectory(Map<String, dynamic> payload) {
                 ? volumeName
                 : chapter.volumeName,
             version: _withVersion(chapter, versions).version,
+            trailer: chapter.trailer,
+            highlight: chapter.highlight,
+            disabled: chapter.disabled,
+            newlyUpdate: chapter.newlyUpdate,
+            vertical: chapter.vertical,
+            hasKnownIndex: chapter.hasKnownIndex,
           ),
         );
       }
@@ -865,6 +939,12 @@ Chapter _withVersion(Chapter chapter, Map<String, String> versions) =>
         title: chapter.title,
         volumeName: chapter.volumeName,
         version: versions[chapter.itemId]!,
+        trailer: chapter.trailer,
+        highlight: chapter.highlight,
+        disabled: chapter.disabled,
+        newlyUpdate: chapter.newlyUpdate,
+        vertical: chapter.vertical,
+        hasKnownIndex: chapter.hasKnownIndex,
       )
     : chapter;
 
@@ -1298,6 +1378,26 @@ bool _flag(Map<String, dynamic> m, List<String> keys) {
   return false;
 }
 
+/// 与 [_flag] 同源，但把「字段缺失」保留为 null。
+///
+/// 官方 `EpisodeInfo.vertical` 是 primitive boolean：Gson 缺字段读成 false。
+/// 因此调用方把 null 与 false 都当作「不竖屏」（保留「全屏观看」），
+/// 同时仍能区分这是一次真实下发还是老缓存/老后端。
+bool? _optionalFlag(Map<String, dynamic> m, List<String> keys) {
+  for (final key in keys) {
+    if (!m.containsKey(key)) continue;
+    final value = m[key];
+    if (value is bool) return value;
+    if (value is num) return value != 0;
+    if (value is String) {
+      final text = value.trim().toLowerCase();
+      if (text == 'true' || text == '1') return true;
+      if (text == 'false' || text == '0') return false;
+    }
+  }
+  return null;
+}
+
 /// 排行行副标题（`secondary_info_list`，`SecondaryInfo.java` 的 wire 格式）。
 ///
 /// 官方按 `line_idx` 把条目分成两行（`ItemDataModel.setAllInfoList`），排行
@@ -1425,16 +1525,20 @@ extension MediaItemJson on MediaItem {
     'badge': badge,
     'ep': ep,
     'kind': kind,
+    // 书旗 bookId 与番茄同为纯数字，来源必须随条目一起落盘，否则恢复后会被
+    // 当成番茄书。`fanqie` 省略，旧缓存数据保持原样。
+    if (source != 'fanqie') 'source': source,
     if (wordNumber > 0) 'wordNumber': wordNumber,
     if (score != null) 'score': score,
     if (seriesId != null) 'seriesId': seriesId,
     if (episodeId != null) 'episodeId': episodeId,
     if (intro.isNotEmpty) 'intro': intro,
     if (followerCount > 0) 'followerCount': followerCount,
+    if (readCount.isNotEmpty) 'readCount': readCount,
+    if (creationStatus >= 0) 'creationStatus': creationStatus,
     if (categories.isNotEmpty) 'categories': categories,
     if (rankTags.isNotEmpty) 'rankTags': rankTags,
-    if (recTags.isNotEmpty)
-      'recTags': [for (final t in recTags) t.toJson()],
+    if (recTags.isNotEmpty) 'recTags': [for (final t in recTags) t.toJson()],
     if (episodeListText.isNotEmpty) 'episodeListText': episodeListText,
     if (aiGenerated) 'aiGenerated': true,
     // The promotional badge must survive a round-trip; the keys reuse
@@ -1454,6 +1558,7 @@ extension MediaItemJson on MediaItem {
     final title = field('title');
     final kind = field('kind');
     if (id.isEmpty || title.isEmpty || kind.isEmpty) return null;
+    final source = field('source');
     return MediaItem(
       id: id,
       title: title,
@@ -1462,6 +1567,8 @@ extension MediaItemJson on MediaItem {
       badge: field('badge'),
       ep: field('ep'),
       kind: kind,
+      // 旧数据没有 source：默认番茄。
+      source: source.isEmpty ? 'fanqie' : source,
       wordNumber: _asInt(map['wordNumber']) ?? 0,
       score: MediaItem._validScore(map['score']),
       tag: MediaTag.fromRaw(
@@ -1471,6 +1578,8 @@ extension MediaItemJson on MediaItem {
       episodeId: (map['episodeId'] as String?),
       intro: field('intro'),
       followerCount: _asInt(map['followerCount']) ?? 0,
+      readCount: field('readCount'),
+      creationStatus: _asInt(map['creationStatus']) ?? -1,
       categories: map['categories'] is List
           ? List.unmodifiable((map['categories'] as List).map((e) => '$e'))
           : const [],

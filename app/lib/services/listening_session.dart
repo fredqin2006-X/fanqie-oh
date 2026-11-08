@@ -17,6 +17,32 @@ class ListeningSession extends ChangeNotifier {
   Duration duration = Duration.zero;
   bool playing = false;
 
+  /// 真人讲书的别名：会话按音频（专辑）id 发布，阅读页按原著 id 打开。
+  ///
+  /// 固定录音的 `bookId` 是听书版本自己的 id，而「边听边读」打开的是关联
+  /// 原著，书名与章节 id 都不是同一套。时间轴给出当前集对应的原著章节后，
+  /// 播放器把两边 id 发布到这里；阅读页用 [matchesBook]/[matchesChapter]
+  /// 匹配，高亮、跟随与迷你栏因此仍然生效。其它书/章节不受影响。
+  String? novelBookId;
+  String? novelChapterId;
+
+  /// 阅读页用的书 id 是否就是本会话（含原著别名）。
+  bool matchesBook(String bookId) =>
+      this.bookId == bookId || (novelBookId != null && novelBookId == bookId);
+
+  /// 阅读页用的章节 id 是否就是本会话正在读的那一章（含原著别名）。
+  bool matchesChapter(String chapterId) =>
+      this.chapterId == chapterId ||
+      (novelChapterId != null && novelChapterId == chapterId);
+
+  /// 当前章节在阅读页里的 id：原著别名优先，其次才是音频章节 id
+  /// （智能朗读两者相同）。时间轴还没给出原著映射时，别名书无法定位到
+  /// 具体章节，调用方据此跳过跟随，而不是串到别的章。
+  String? get readerChapterId {
+    final novel = novelChapterId;
+    return novel != null && novel.isNotEmpty ? novel : chapterId;
+  }
+
   /// System TTS reports character progress, never a fabricated audio duration.
   double? textProgress;
   int? textReplacementRevision;
@@ -36,13 +62,21 @@ class ListeningSession extends ChangeNotifier {
   /// [sentenceRange] indexes the TTS text blob. Conflating them would smear the
   /// highlight across paragraphs, so they stay separate fields and the reader
   /// picks whichever its source produced.
-  ({int startPara, int startOff, int endPara, int endOff, int? elemIndex, int? elemOff})? audioParaRange;
+  ({
+    int startPara,
+    int startOff,
+    int endPara,
+    int endOff,
+    int? elemIndex,
+    int? elemOff,
+  })?
+  audioParaRange;
 
   DateTime _lastNotify = DateTime.fromMillisecondsSinceEpoch(0);
 
   /// Whether this session is narrating the given chapter right now.
   bool matches(String bookId, String chapterId) =>
-      playing && this.bookId == bookId && this.chapterId == chapterId;
+      playing && matchesBook(bookId) && matchesChapter(chapterId);
 
   /// Estimated chapter progress (0..1), from text position for system TTS or
   /// elapsed audio time for recordings. Reader page following is proportional.
@@ -100,22 +134,45 @@ class ListeningSession extends ChangeNotifier {
   set jumpToPlaybackHandler(void Function()? handler) =>
       _jumpToPlaybackHandler.value = handler;
 
-  /// 跟随开关：按一次定位键开跟随，再按一次放开自由翻页。
-  ///
   /// 当前正在用的音色 id（智能朗读的音色、或真人讲书的 narrator id）。
   ///
   /// 阅读页「从本页播放」要沿用同一个音色重新起播 —— 之前不传，播放页只能
   /// 拿历史记录或默认音色，于是听着真人讲书点一下就换成了内置 TTS 音色。
   String? toneId;
 
-  /// 跟随开关：按定位键开、手动翻页关。
+  /// 跟随开关：默认跟随朗读，手动翻页后停下等「原进度」。
+  ///
+  /// 官方默认跟随：播放一开始（`AudioSyncReaderController` 的父类
+  /// `d.java:143-151` `onPlayStart`，以及 `AudioSyncReaderController.java:381`
+  /// `onPlayResume`）就把页面同步到朗读处，不需要用户按任何按钮。这里在
+  /// [update] 检测到「开始播这本书」时自动置真；手动翻页会把它清掉，之后同一
+  /// 段播放的 tick 不会再打开它（对应官方 `d.java:288-293` 中 `C=true` 后
+  /// 暂停、等「原进度」恢复）。
   bool followArmed = false;
+
+  /// 本章已自然播完。官方在 `onPlayCompletion`（`d.java:92-100`）收起
+  /// 播放/同步按钮；下一次起播会清掉这个标记。
+  bool completed = false;
+
+  /// 阅读页打开时，这本书已经在播就默认跟随。
+  ///
+  /// 起播可能发生在阅读页打开之前（`onPlayStart` 的时机已经过去），
+  /// 这条补上「打开书就跟随」。
+  void followIfPlaying(String bookId) {
+    if (playing && matchesBook(bookId)) setFollowArmed(true);
+  }
+
+  /// 本章播完（自然播完或片尾跳过），阅读页收起底部按钮。
+  void markCompleted() {
+    if (completed) return;
+    completed = true;
+    notifyListeners();
+  }
 
   /// 改跟随开关并广播。
   ///
-  /// 迷你栏的图标要跟着变色/变实心，但它挂在 Overlay 上、不随阅读页重建，
-  /// 只能靠这条通知刷；阅读页自己退出跟随时也必须发一次，否则按钮会一直
-  /// 显示「跟随中」。
+  /// 阅读页手动翻页要退出跟随，而底部的同步胶囊/播放胶囊靠这条通知刷新，
+  /// 所以「退出」也必须广播，否则按钮会一直显示旧状态。
   void setFollowArmed(bool value) {
     if (followArmed == value) return;
     followArmed = value;
@@ -132,16 +189,31 @@ class ListeningSession extends ChangeNotifier {
     double? textProgress,
     int? textReplacementRevision,
     ({int start, int end})? sentenceRange,
-    ({int startPara, int startOff, int endPara, int endOff, int? elemIndex, int? elemOff})? audioParaRange,
+    ({
+      int startPara,
+      int startOff,
+      int endPara,
+      int endOff,
+      int? elemIndex,
+      int? elemOff,
+    })?
+    audioParaRange,
     String? cue,
     int? cueEndsAtMs,
     String? toneId,
     SubtitleTrack? subtitles,
+    String? novelBookId,
+    String? novelChapterId,
   }) {
+    final wasPlaying = this.playing;
+    final wasCompleted = completed;
+    final switchedBook = this.bookId != bookId;
     final structural =
         this.bookId != bookId ||
         this.chapterId != chapterId ||
         this.playing != playing ||
+        this.novelBookId != novelBookId ||
+        this.novelChapterId != novelChapterId ||
         this.sentenceRange != sentenceRange ||
         this.cue != cue ||
         this.cueEndsAtMs != cueEndsAtMs ||
@@ -150,9 +222,21 @@ class ListeningSession extends ChangeNotifier {
     this.bookId = bookId;
     this.chapterId = chapterId;
     this.chapterTitle = chapterTitle;
+    this.novelBookId = novelBookId;
+    this.novelChapterId = novelChapterId;
     this.position = position;
     this.duration = duration;
     this.playing = playing;
+    // 官方默认跟随：播放开始 / 继续播放 / 换了一本正在播的书，都重新开跟随。
+    // 同一段播放里的 tick 不会重开，手动翻页退出跟随才站得住。
+    //
+    // 自动连播的换章不算起播：那一拍 `playing` 也是从 false 翻上来的（本章
+    // 播完 guard 先发过 playing:false），但用户早前已经手动翻页走开，跟随
+    // 不该在换章时把人拽回新章章首。`completed` 正好标出这条路径。
+    if (playing && ((!wasPlaying && !wasCompleted) || switchedBook)) {
+      followArmed = true;
+    }
+    if (playing) completed = false;
     this.textProgress = textProgress;
     this.textReplacementRevision = textReplacementRevision;
     this.sentenceRange = sentenceRange;
@@ -175,6 +259,8 @@ class ListeningSession extends ChangeNotifier {
     bookId = null;
     chapterId = null;
     chapterTitle = null;
+    novelBookId = null;
+    novelChapterId = null;
     position = Duration.zero;
     duration = Duration.zero;
     playing = false;
@@ -186,6 +272,8 @@ class ListeningSession extends ChangeNotifier {
     toneId = null;
     subtitles = null;
     audioParaRange = null;
+    completed = false;
+    followArmed = false;
     notifyListeners();
   }
 }

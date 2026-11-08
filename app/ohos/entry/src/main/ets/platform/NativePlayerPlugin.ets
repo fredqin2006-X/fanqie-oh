@@ -38,6 +38,7 @@ class PlayerSession {
   duration: number = 0;
   surfaceView: number = -1;
   mainSurface: string = '0';
+  startPosition: number = 0;
   constructor(id: number, texture: SurfaceTextureEntry | null) { this.id = id; this.texture = texture; }
 }
 interface MediaSourceReply { id: string; url: string; }
@@ -52,6 +53,9 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
   private background: BackgroundMedia | null = null;
   private floating: FloatingVideo | null = null;
   private floatingQueue: Promise<void> = Promise.resolve();
+  private nextFloatingOwner: number = 0;
+  private floatingOwner: number = 0;
+  private floatingOwners: Set<number> = new Set();
   private context: common.UIAbilityContext;
   private windowPolicy: WindowPolicy;
   constructor(context: common.UIAbilityContext, windowPolicy: WindowPolicy) { this.context = context; this.windowPolicy = windowPolicy; }
@@ -87,6 +91,7 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
     this.events = null;
     this.background?.stop().catch(() => {}); this.background = null;
     const floating = this.floating; this.floating = null;
+    this.floatingOwners.clear(); this.floatingOwner = 0;
     this.floatingQueue = this.floatingQueue.then(async () => { await floating?.stop(); }).catch(() => {});
     this.windowPolicy.keep('media', false).catch(() => {});
     for (const item of this.sessions.values()) { this.dispose(item); }
@@ -111,6 +116,9 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
       item.forceSoftware = item.texture !== null && call.argument('videoDecoder') === 'software';
       item.forceHardware = item.texture !== null && call.argument('videoDecoder') === 'hardware';
       item.base = typeof base === 'string' ? base : '';
+      const startPosition = call.argument('startPositionMs') as number;
+      item.startPosition = Number.isFinite(startPosition) && startPosition > 0 ?
+        Math.min(startPosition, Number.MAX_SAFE_INTEGER) : 0;
       this.sessions.set(item.id, item);
       const reply = new Map<string, Object>(); reply.set('playerId', item.id); result.success(reply);
       this.prepare(item, url, key).catch((error: Error) => this.fail(item, error));
@@ -130,17 +138,41 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
     if (call.method === 'canDrawOverlays') { result.success(FloatingVideo.supported()); return; }
     // System PiP has no Android-style overlay permission page.
     if (call.method === 'requestOverlayPermission') { result.success(false); return; }
+    if (call.method === 'allocateFloatingOwner') {
+      const owner = ++this.nextFloatingOwner;
+      this.floatingOwners.add(owner); result.success(owner); return;
+    }
     if (['startFloating', 'showFloating', 'stopFloating', 'swapFloatingPlayer', 'updateFloating'].includes(call.method)) {
       const floating = this.floating;
+      const owner = call.argument('owner') as number;
+      if (call.method === 'stopFloating') { this.floatingOwners.delete(owner); }
       this.floatingQueue = this.floatingQueue.then(async () => {
         if (!floating || this.floating !== floating) { result.error('PIP_DETACHED', '画中画已关闭', null); return; }
+        if (call.method === 'stopFloating') {
+          try {
+            if (this.floatingOwner === owner) {
+              this.floatingOwner = 0;
+              await floating.stop(); await this.background?.stop('floating');
+            }
+            result.success(null);
+          } catch (_) { result.error('PIP_UNAVAILABLE', '画中画释放失败', null); }
+          return;
+        }
+        if (!this.floatingOwners.has(owner) ||
+          (call.method !== 'startFloating' && this.floatingOwner !== owner) ||
+          (call.method === 'startFloating' && this.floatingOwner > owner)) {
+          result.error('PIP_RETIRED', '画中画会话已结束', null); return;
+        }
         try {
           if (call.method === 'startFloating' || call.method === 'swapFloatingPlayer') {
             const playerId = call.argument('playerId') as number;
             const session = this.sessions.get(playerId);
             if (!session || session.disposed || session.failed || !session.ready || !session.texture) { throw new Error('PLAYER_NOT_READY'); }
             if (call.method === 'startFloating') {
+              if (this.floatingOwner > 0) { this.floatingOwners.delete(this.floatingOwner); }
+              this.floatingOwner = owner;
               await floating.prepare(call, playerId);
+              if (!this.floatingOwners.has(owner)) { throw new Error('PIP_RETIRED'); }
               if (!this.background) { throw new Error('MEDIA_SESSION_DETACHED'); }
               await this.background.update(call, 'floating');
             }
@@ -152,7 +184,9 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
         } catch (_) {
           if (call.method === 'startFloating' || call.method === 'showFloating') {
             try { await floating.stop(); await this.background?.stop('floating'); } catch (_) { /* preserve original failure */ }
-            if (call.method === 'showFloating') { this.method?.invokeMethod('onNotificationAction', 'stop'); }
+            this.floatingOwners.delete(owner); this.floatingOwner = 0;
+            const stopped = new Map<string, Object>(); stopped.set('owner', owner);
+            this.method?.invokeMethod('onFloatingStopped', stopped);
           }
           result.error('PIP_UNAVAILABLE', '系统画中画暂不可用，请检查画中画开关', null);
         }
@@ -252,6 +286,11 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
         item.stage = 'prepared';
         item.ready = true;
         player.setVolume(item.volume); player.setPlaybackRate(item.rate);
+        if (item.startPosition > 0) {
+          const position = item.startPosition < player.duration ? item.startPosition : 0;
+          item.startPosition = 0;
+          player.seek(position, media.SeekMode.SEEK_CLOSEST);
+        }
         this.emit(item, 'created', item.texture ? item.texture.getTextureId() : 0);
         this.emit(item, 'duration', player.duration);
         this.emit(item, 'buffering', false);
@@ -339,6 +378,11 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
           this.emit(item, 'buffering', false);
           software.command(item.softwareId, 'volume', item.volume);
           software.command(item.softwareId, 'rate', item.rate);
+          if (item.startPosition > 0) {
+            const position = item.startPosition < state.duration ? item.startPosition : 0;
+            item.startPosition = 0;
+            software.command(item.softwareId, 'seek', position);
+          }
           if (item.playWhenReady) { software.command(item.softwareId, 'play', 0); }
           hilog.info(0x0000, 'FqPlayer', 'software prepared player=%{public}d duration=%{public}d', item.id, state.duration);
           break;

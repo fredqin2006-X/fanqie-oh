@@ -82,12 +82,16 @@ test('PiP prepares without moving video, shows once, swaps and restores surfaces
   assert.equal(f.nodes[0].disposed, true);
 });
 test('PiP system controls and restoration use existing Dart remote actions', async () => {
-  const f = pipFixture(); await f.video.prepare(call('startFloating'), 7); await f.video.show();
+  const f = pipFixture(); await f.video.prepare(call('startFloating', { owner: 41 }), 7); await f.video.show();
   const listeners = f.controllers[0].listeners;
   listeners.get('controlEvent')({ controlType: 0 });
   listeners.get('controlEvent')({ controlType: 2 });
   listeners.get('stateChange')(5); listeners.get('stateChange')(4);
-  assert.deepEqual(f.actions.map(x => x[1]), ['playPause', 'next', 'fullscreen']);
+  assert.deepEqual(f.actions.map(x => [x[0], Object.fromEntries(x[1])]), [
+    ['onFloatingAction', { owner: 41, action: 'playPause' }],
+    ['onFloatingAction', { owner: 41, action: 'next' }],
+    ['onFloatingAction', { owner: 41, action: 'fullscreen' }],
+  ]);
   assert.deepEqual(f.targets.at(-1), [7, null]);
   await f.video.stop();
 });
@@ -216,20 +220,32 @@ test('volume key bridge debounces holds, yields while inactive, and restores on 
 });
 
 function nativePlayerFixture() {
-  const players = [], softwares = [], events = [];
+  const players = [], softwares = [], events = [], pipCalls = [], seeks = [];
+  const state = { prepareGate: null };
   class Channel { setMethodCallHandler() {} setStreamHandler() {} invokeMethod() {} }
   const dependencies = {
     '@ohos/flutter_ohos': { MethodChannel: Channel, EventChannel: Channel },
-    '@kit.MediaKit': { media: { createAVPlayer: async () => {
+    '@kit.MediaKit': { media: { SeekMode: { SEEK_CLOSEST: 0 }, createAVPlayer: async () => {
       const listeners = new Map();
       const player = { listeners, on: (event, fn) => listeners.set(event, fn),
-        async release() {}, async prepare() {}, setVolume() {}, setPlaybackRate() {} };
+        duration: 10000, width: 1920, height: 1080,
+        async release() {}, async prepare() {}, setVolume() {}, setPlaybackRate() {},
+        seek(position) { seeks.push(position); } };
       players.push(player); return player;
     } } },
     '@kit.AudioKit': { audio: {} }, '@kit.NetworkKit': { http: {} },
     '@kit.PerformanceAnalysisKit': { hilog: { info() {}, error() {} } },
-    './BackgroundMedia': { BackgroundMedia: class { async stop() {} } },
-    './FloatingVideo': { FloatingVideo: class { owns() { return false; } async stop() {} } },
+    './BackgroundMedia': { BackgroundMedia: class { async stop() {} async update() {} } },
+    './FloatingVideo': { FloatingVideo: class {
+      static supported() { return true; }
+      owns() { return false; }
+      async prepare(call, id) { pipCalls.push(['prepare', call.argument('owner'), id]);
+        if (state.prepareGate) await state.prepareGate.promise; }
+      async stop() { pipCalls.push(['stop']); }
+      async show() { pipCalls.push(['show']); }
+      swap(id) { pipCalls.push(['swap', id]); }
+      update() { pipCalls.push(['update']); }
+    } },
     './SoftwareVideoView': { SoftwareVideoViewFactory: class {} },
     'libfqplayer.so': { create(url) { softwares.push(url); return 101; }, async release() {} },
   };
@@ -240,8 +256,47 @@ function nativePlayerFixture() {
   plugin.onAttachedToEngine({ getPlatformViewRegistry: () => ({ registerViewFactory() {} }),
     getTextureRegistry: () => textures, getBinaryMessenger() {} });
   plugin.onListen(null, { success: event => events.push(Object.fromEntries(event)) });
-  return { plugin, players, softwares, events };
+  return { plugin, players, softwares, events, pipCalls, seeks, state };
 }
+async function readyNativePlayer(f, startPositionMs = 0) {
+  const reply = await invoke(f.plugin, 'create', {
+    cdnUrl: 'https://example.invalid/a.mp4', keyHex: '', videoDecoder: 'hardware', startPositionMs,
+  });
+  await tick();
+  f.players.at(-1).listeners.get('stateChange')('prepared');
+  return reply.get('playerId');
+}
+test('native player applies resume position before publishing readiness and rejects a past-end resume', async () => {
+  const f = nativePlayerFixture();
+  const first = await readyNativePlayer(f, 4200);
+  assert.deepEqual(f.seeks, [4200]);
+  await invoke(f.plugin, 'dispose', { id: first });
+  const second = await readyNativePlayer(f, 11000);
+  assert.deepEqual(f.seeks, [4200, 0]);
+  await invoke(f.plugin, 'dispose', { id: second });
+});
+test('PiP owner retirement fences delayed starts and old commands cannot stop the current owner', async () => {
+  const f = nativePlayerFixture(), id = await readyNativePlayer(f);
+  const old = await invoke(f.plugin, 'allocateFloatingOwner');
+  f.state.prepareGate = deferred();
+  const start = invoke(f.plugin, 'startFloating', { owner: old, playerId: id });
+  const rejected = assert.rejects(start, /PIP_UNAVAILABLE/);
+  await tick();
+  const stop = invoke(f.plugin, 'stopFloating', { owner: old });
+  f.state.prepareGate.resolve();
+  await rejected; await stop;
+  f.state.prepareGate = null;
+  const owner = await invoke(f.plugin, 'allocateFloatingOwner');
+  await invoke(f.plugin, 'startFloating', { owner, playerId: id });
+  const before = f.pipCalls.length;
+  await invoke(f.plugin, 'stopFloating', { owner: old });
+  assert.equal(f.pipCalls.length, before);
+  await assert.rejects(invoke(f.plugin, 'updateFloating', { owner: old }), /PIP_RETIRED/);
+  await invoke(f.plugin, 'showFloating', { owner });
+  assert.deepEqual(f.pipCalls.at(-1), ['show']);
+  await invoke(f.plugin, 'stopFloating', { owner });
+  await invoke(f.plugin, 'dispose', { id });
+});
 test('explicit software decoder bypasses AVPlayer; hardware does not silently fall back', async () => {
   const f = nativePlayerFixture();
   await invoke(f.plugin, 'create', { cdnUrl: 'https://example.invalid/a.mp4', keyHex: '', videoDecoder: 'software' });
