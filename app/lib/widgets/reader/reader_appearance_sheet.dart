@@ -133,11 +133,7 @@ class _ReaderAppearanceSheetState
   @override
   ValueChanged<ReaderPreferences> get onPreferencesChanged => widget.onChanged;
 
-  late final AnimationController _expand = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 320),
-    value: 1,
-  );
+  late final AnimationController _expand;
   final _bodyKey = GlobalKey();
   final _contentsKey = GlobalKey();
   final _behaviorKey =
@@ -151,6 +147,11 @@ class _ReaderAppearanceSheetState
   @override
   void initState() {
     super.initState();
+    _expand = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 320),
+      value: 1,
+    );
     _category = switch (widget.initialSection) {
       ReaderSettingsSection.operations => 'operations',
       ReaderSettingsSection.listening => 'listening',

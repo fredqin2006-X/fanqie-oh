@@ -27,7 +27,7 @@ import 'home_rank_scroll_physics.dart';
 // 几何与抽出波形参考 mikufoxxx/Wenku8_Flutter 的 ebcd7f1（GPL-3.0）；
 // 这里保留有限排行榜，不复制上游循环书架的虚拟名次。
 
-const double _shelfMaxWidth = 520;
+const double _shelfMaxWidth = 1120;
 
 class _ShelfGeometry {
   const _ShelfGeometry({

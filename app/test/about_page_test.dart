@@ -63,7 +63,7 @@ void main() {
       previousTop = top;
     }
 
-    expect(find.text('支持上游作者'), findsOneWidget);
+    expect(find.text('支持作者'), findsOneWidget);
     expect(find.text('前往爱发电'), findsOneWidget);
     expect(find.text('微信赞赏'), findsOneWidget);
     expect(find.textContaining('仅限个人学习研究使用'), findsOneWidget);

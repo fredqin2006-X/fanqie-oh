@@ -155,7 +155,7 @@ void main() {
       );
 
       expect(find.textContaining('备份文件已保存'), findsOneWidget);
-      expect(savedName, startsWith('fqapp-backup-'));
+      expect(savedName, startsWith('fanqie-oh-backup-'));
       final backup = LibraryBackup.decode(savedBytes!);
       expect(backup.shelf.map((record) => record.item.id), contains('9001'));
       expect(backup.history, hasLength(1));
@@ -363,7 +363,7 @@ void main() {
       await tester.tap(find.text('导出筛选结果'));
       await tester.pumpAndSettle();
 
-      expect(sink.fileName, startsWith('fqapp-app-logs-'));
+      expect(sink.fileName, startsWith('fanqie-oh-app-logs-'));
       expect(sink.text, contains('待导出的日志'));
       expect(find.textContaining('已导出 1 条'), findsOneWidget);
       expect(tester.takeException(), isNull);

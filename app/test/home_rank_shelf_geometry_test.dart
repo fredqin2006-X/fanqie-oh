@@ -65,6 +65,38 @@ void main() {
   }
 
   group('archive shelf geometry', () {
+    testWidgets('the shelf uses tablet width and caps ultrawide windows', (
+      tester,
+    ) async {
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      addTearDown(() => tester.pumpWidget(const SizedBox.shrink()));
+
+      for (final (screenWidth, expectedWidth) in [
+        (400.0, 400.0),
+        (880.0, 880.0),
+        (1440.0, 1120.0),
+      ]) {
+        await tester.binding.setSurfaceSize(Size(screenWidth, 900));
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: HomeRankShelf(
+                books: [book('r1', '榜书一'), book('r2', '榜书二')],
+                onOpen: (_) {},
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+
+        expect(
+          tester.getSize(find.byType(SingleChildScrollView).first).width,
+          closeTo(expectedWidth, .1),
+        );
+        expect(tester.takeException(), isNull);
+      }
+    });
+
     testWidgets(
       'a short viewport shrinks the shelf without losing the controls',
       (tester) async {

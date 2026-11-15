@@ -52,6 +52,22 @@ Active Connections
       if (!Platform.isWindows) return;
       final proxy = await _Server.start(_httpProxy);
       addTearDown(proxy.close);
+      ProcessResult netstat;
+      try {
+        netstat = await Process.run('netstat', ['-ano', '-p', 'tcp']);
+      } on ProcessException {
+        markTestSkipped('netstat is unavailable in this Windows test host.');
+        return;
+      }
+      if (netstat.exitCode != 0 ||
+          !LocalProxyDiscovery.parseWindowsNetstat(
+            netstat.stdout as String,
+          ).any((endpoint) => endpoint.port == proxy.port)) {
+        markTestSkipped(
+          'This Windows test host hides its temporary listener from netstat.',
+        );
+        return;
+      }
       final results = await LocalProxyDiscovery().discover();
       expect(
         results.map((candidate) => candidate.url),

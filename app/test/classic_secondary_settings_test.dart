@@ -288,7 +288,7 @@ void main() {
     await tester.tap(find.text('微信赞赏'));
     await tester.pumpAndSettle();
     expect(find.byType(Dialog), findsOneWidget);
-    expect(find.text('微信扫一扫，赞赏作者'), findsOneWidget);
+    expect(find.text('微信扫一扫，赞赏上游作者'), findsOneWidget);
     await tester.tap(find.text('关闭'));
     await tester.pumpAndSettle();
 
@@ -441,7 +441,7 @@ void main() {
 
       await tester.tap(find.widgetWithText(SettingsRow, '关于'));
       await tester.pumpAndSettle();
-      expect(find.text('什锦铺'), findsOneWidget);
+      expect(find.text('番茄OH'), findsOneWidget);
       expect(find.byType(SettingsScaffold), findsOneWidget);
       expect(find.byTooltip('返回'), findsNothing);
 
