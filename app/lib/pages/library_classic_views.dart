@@ -66,8 +66,37 @@ mixin _LibraryClassicViews on _LibraryClassicChrome {
     };
   }
 
+  /// 空态锚点补偿用的动态头部总高：筛选状态栏定高（行内文字已钳制
+  /// 1.3 倍内，定高恒成立）；缓存扫描行只在扫描未完成时占高（完成后
+  /// 是 SizedBox.shrink），高度随 textScaler 与实际渲染同源计算。
+  double get _classicDynamicHeaderHeight {
+    var height = 0.0;
+    if (_classicHasFilters) height += ShelfTokens.filterStatusHeight;
+    if (_tab != 1 &&
+        ShelfViewStore.instance.state.source == ShelfSourceFilter.cached &&
+        !_cacheScanComplete) {
+      height += shelfCacheStatusHeight(context);
+    }
+    return height;
+  }
+
   Widget _classicEmptyState() {
-    if (_tab == 0 && _shelf.isEmpty) {
+    final headerHeight = _classicDynamicHeaderHeight;
+    final category = _tab == 0 ? _category : ShelfCategory.all;
+    // A selected group is empty only when no shelf entry belongs to it at all.
+    // Other active filters must keep the generic "没有符合筛选" copy: the
+    // group itself still has books, they are just hidden by source/reading.
+    final groupEmpty =
+        _tab == 0 &&
+        category != ShelfCategory.all &&
+        !_shelf.any(
+          (entry) => ShelfGroupStore.instance.matchesKey(
+            entry.contentKey,
+            entry.author,
+            category,
+          ),
+        );
+    if (_tab == 0 && _shelf.isEmpty && !groupEmpty) {
       return _ClassicEmptyNotice(
         icon: LucideIcons.book_open,
         title: '书架暂无书籍',
@@ -76,6 +105,7 @@ mixin _LibraryClassicViews on _LibraryClassicChrome {
         actionKey: const Key('shelf-browse-button'),
         onAction: widget.onBrowse,
         onCachedBooks: _openCachedBooks,
+        headerHeight: headerHeight,
       );
     }
     if (_tab == 2 &&
@@ -88,24 +118,31 @@ mixin _LibraryClassicViews on _LibraryClassicChrome {
           'manju' => '暂无漫剧',
           _ => '暂无收藏内容',
         },
-        actionLabel: '找短剧',
+        actionLabel: _collectionFilter == 'manju' ? '找漫剧' : '找短剧',
         actionKey: const Key('collection-find-drama-button'),
         onAction: widget.onFindDrama,
+        headerHeight: headerHeight,
       );
     }
     final filtered = _classicHasFilters;
+    final groupEmptyTitle = groupEmpty
+        ? '「${ShelfGroupStore.instance.nameOf(category)}」暂无书籍'
+        : null;
     return _ClassicEmptyNotice(
       icon: LucideIcons.search_x,
-      title: !filtered
-          ? '未找到相关内容'
-          : switch (_tab) {
-              0 => '没有符合筛选的书籍',
-              2 => '没有符合筛选的收藏',
-              _ => '没有符合筛选的记录',
-            },
+      title:
+          groupEmptyTitle ??
+          (!filtered
+              ? '未找到相关内容'
+              : switch (_tab) {
+                  0 => '没有符合筛选的书籍',
+                  2 => '没有符合筛选的收藏',
+                  _ => '没有符合筛选的记录',
+                }),
       actionLabel: filtered ? '清除筛选' : null,
       actionKey: const Key('shelf-clear-filters'),
       onAction: _clearFilters,
+      headerHeight: headerHeight,
     );
   }
 

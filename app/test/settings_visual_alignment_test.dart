@@ -161,7 +161,12 @@ void main() {
     expect(dotColor, scheme.onSurfaceVariant);
     expect(dotColor, isNot(Colors.green), reason: '停止状态不再使用 Material 绿');
     expect(dotColor, isNot(scheme.error), reason: '停止状态不再使用 error 红');
-    expect(find.byType(AppGlassSwitch), findsOneWidget);
+    expect(
+      find.byWidgetPredicate(
+        (widget) => widget is AppGlassSwitch && widget.semanticLabel == '局域网共享',
+      ),
+      findsOneWidget,
+    );
     // 作为根页面时没有可返回的路由，不渲染返回键。
     expect(find.byTooltip('返回'), findsNothing);
   });
@@ -234,7 +239,9 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    final switchFinder = find.byType(AppGlassSwitch);
+    final switchFinder = find.byWidgetPredicate(
+      (widget) => widget is AppGlassSwitch && widget.semanticLabel == '局域网共享',
+    );
     expect(tester.widget<AppGlassSwitch>(switchFinder).value, isFalse);
 
     await tester.tap(switchFinder);
@@ -267,18 +274,25 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.byType(ArchiveSection), findsNWidgets(2));
+    expect(find.byType(ArchiveSection), findsNWidgets(3));
     expect(find.byType(ContentPanel), findsWidgets);
-    expect(find.byType(FeatureEntry), findsOneWidget);
-    // The three data rows stay individually pinned: export, restore, 番茄.
+    // Backup and cloud sync entry points remain individually pinned.
     expect(find.byKey(const ValueKey('backup-export')), findsOneWidget);
     expect(find.byKey(const ValueKey('backup-import')), findsOneWidget);
-    expect(find.byKey(const ValueKey('backup-fanqie')), findsOneWidget);
+    expect(find.byKey(const ValueKey('backup-webdav')), findsOneWidget);
+    expect(find.byType(FeatureEntry), findsOneWidget);
     expect(find.text('导出备份'), findsOneWidget);
     expect(find.text('从备份文件恢复'), findsOneWidget);
-    expect(find.text('导入番茄书架'), findsOneWidget);
+    expect(find.text('WebDAV 同步'), findsOneWidget);
+    expect(find.text('书架随你走'), findsOneWidget);
     expect(find.byType(SettingsSectionHeader), findsNothing);
     expect(find.byType(SettingsGroupCard), findsNothing);
-    expect(find.text('书架随你走'), findsOneWidget);
+    await tester.scrollUntilVisible(
+      find.byKey(const ValueKey('backup-fanqie')),
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    expect(find.byKey(const ValueKey('backup-fanqie')), findsOneWidget);
+    expect(find.text('导入番茄书架'), findsOneWidget);
   });
 }

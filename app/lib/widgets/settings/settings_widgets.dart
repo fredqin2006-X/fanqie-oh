@@ -23,6 +23,9 @@ AppBar settingsAppBar(
   required String title,
   List<Widget>? actions,
   PreferredSizeWidget? bottom,
+  // Embedded panes (Windows two-pane settings) own a Navigator with exactly
+  // one route; a back button there cannot pop, so the shell can omit it.
+  bool showBack = true,
 }) {
   final palette = HomePalette.of(context);
   return AppBar(
@@ -32,10 +35,13 @@ AppBar settingsAppBar(
     scrolledUnderElevation: 0,
     centerTitle: true,
     leadingWidth: 56,
-    leading: const Padding(
-      padding: EdgeInsets.only(left: 10),
-      child: Center(child: HomeBackButton()),
-    ),
+    automaticallyImplyLeading: false,
+    leading: showBack
+        ? const Padding(
+            padding: EdgeInsets.only(left: 10),
+            child: Center(child: HomeBackButton()),
+          )
+        : null,
     title: Text(title),
     actions: actions,
     bottom: bottom,
@@ -50,28 +56,106 @@ class SettingsScaffold extends StatelessWidget {
     required this.body,
     this.actions,
     this.bottom,
+    this.bottomNavigationBar,
     this.resizeToAvoidBottomInset,
+    this.showBack = true,
+    this.extendBodyBehindAppBar = false,
   });
 
   final String title;
   final Widget body;
   final List<Widget>? actions;
   final PreferredSizeWidget? bottom;
+
+  /// Fixed action bar under the body (classic feature pages that pin their
+  /// primary action). Archive feature pages keep their in-page actions.
+  final Widget? bottomNavigationBar;
+
   final bool? resizeToAvoidBottomInset;
+
+  /// Default keeps the original settings behaviour; the feature-page shell
+  /// passes the nearest Navigator's `canPop` for embedded panes.
+  final bool showBack;
+
+  /// The classic feature shell extends the body behind its opaque AppBar so a
+  /// page that still uses the archive header clearance keeps the same first-row
+  /// position instead of reserving status bar + toolbar height twice.
+  final bool extendBodyBehindAppBar;
 
   @override
   Widget build(BuildContext context) {
     final palette = HomePalette.of(context);
     return Scaffold(
       backgroundColor: palette.canvas,
+      extendBodyBehindAppBar: extendBodyBehindAppBar,
       appBar: settingsAppBar(
         context,
         title: title,
         actions: actions,
         bottom: bottom,
+        showBack: showBack,
       ),
       resizeToAvoidBottomInset: resizeToAvoidBottomInset,
+      bottomNavigationBar: bottomNavigationBar,
       body: body,
+    );
+  }
+}
+
+/// A surface panel: `surface` fill, a 0.6dp `line` border and the shared
+/// corner radius.
+///
+/// It is the shell behind [SettingsGroupCard] and the AI reading info cards,
+/// so a panel looks the same wherever it appears.
+///
+/// Two shells share the one visual definition. With `ink` (the default for
+/// [SettingsGroupCard]) the fill is a `Material` with `Clip.antiAlias`, so
+/// `InkWell` ripples are hosted and clipped to the rounded shape. Without it
+/// the fill is a plain `DecoratedBox` — visually identical, but with no clip
+/// layer and no ink host, which keeps the per-frame repaint of the whole page
+/// cheap while the keyboard animation relayouts it (a `Material` here cost
+/// about twice the paint/build work of the decorated box on the same page).
+/// Cards without an interactive ink child should stay on the default.
+class SurfacePanel extends StatelessWidget {
+  const SurfacePanel({
+    super.key,
+    required this.child,
+    this.padding = EdgeInsets.zero,
+    this.radius = SettingsGroupCard.radius,
+    this.ink = false,
+  });
+
+  final Widget child;
+  final EdgeInsetsGeometry padding;
+
+  /// Corner radius; the shared token by default.
+  final double radius;
+
+  /// Host `InkWell` ink and clip it to the shape.
+  final bool ink;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = HomePalette.of(context);
+    final body = Padding(padding: padding, child: child);
+    if (!ink) {
+      return DecoratedBox(
+        decoration: BoxDecoration(
+          color: palette.surface,
+          borderRadius: BorderRadius.circular(radius),
+          border: Border.all(color: palette.line, width: 0.6),
+        ),
+        child: body,
+      );
+    }
+    return Material(
+      color: palette.surface,
+      clipBehavior: Clip.antiAlias,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(radius),
+        side: BorderSide(color: palette.line, width: 0.6),
+      ),
+      child: body,
     );
   }
 }
@@ -99,13 +183,8 @@ class SettingsGroupCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = HomePalette.of(context);
-    return Material(
-      color: palette.surface,
-      clipBehavior: Clip.antiAlias,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(radius),
-        side: BorderSide(color: palette.line, width: 0.6),
-      ),
+    return SurfacePanel(
+      ink: true,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [

@@ -1,73 +1,12 @@
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:hive_ce/hive.dart';
 
-/// Minimal read/write surface over the platform secure store, kept as an
-/// interface so tests can substitute an in-memory fake instead of driving a
-/// MethodChannel.
-abstract interface class SecureKeyStorage {
-  Future<String?> read(String key);
-  Future<void> write(String key, String value);
-  Future<void> delete(String key);
-}
+import 'native_secure_key_storage.dart';
+import 'secure_key_storage.dart';
 
-/// HarmonyOS uses a non-exportable HUKS wrapping key. Errors propagate so a
-/// missing keystore never becomes a normal empty library.
-class HarmonySecureKeyStorage implements SecureKeyStorage {
-  const HarmonySecureKeyStorage();
-  static const _channel = MethodChannel('fqapp/secure_keys');
-  @override
-  Future<String?> read(String key) =>
-      _channel.invokeMethod<String>('read', {'key': key});
-  @override
-  Future<void> write(String key, String value) =>
-      _channel.invokeMethod<void>('write', {'key': key, 'value': value});
-
-  @override
-  Future<void> delete(String key) =>
-      _channel.invokeMethod<void>('delete', {'key': key});
-}
-
-/// Production backend: `flutter_secure_storage` (Android Keystore /
-/// EncryptedSharedPreferences, iOS Keychain). The raw key bytes never touch
-/// SharedPreferences or any other plaintext store.
-class FlutterSecureKeyStorage implements SecureKeyStorage {
-  const FlutterSecureKeyStorage([this._storage = const FlutterSecureStorage()]);
-
-  final FlutterSecureStorage _storage;
-
-  @override
-  Future<String?> read(String key) => _storage.read(key: key);
-
-  @override
-  Future<void> write(String key, String value) =>
-      _storage.write(key: key, value: value);
-
-  @override
-  Future<void> delete(String key) => _storage.delete(key: key);
-}
-
-/// In-memory fake for tests and for environments without a platform channel.
-class InMemorySecureKeyStorage implements SecureKeyStorage {
-  final Map<String, String> _values = {};
-
-  @override
-  Future<String?> read(String key) async => _values[key];
-
-  @override
-  Future<void> write(String key, String value) async {
-    _values[key] = value;
-  }
-
-  @override
-  Future<void> delete(String key) async {
-    _values.remove(key);
-  }
-}
+export 'secure_key_storage.dart';
 
 /// Owns the random 256-bit keys that encrypt local data at rest.
 ///
@@ -90,11 +29,7 @@ class SecureKeyProvider {
   SecureKeyProvider({
     SecureKeyStorage? storage,
     this.storageTimeout = const Duration(seconds: 10),
-  }) : _storage =
-           storage ??
-           (!kIsWeb && Platform.operatingSystem == 'ohos'
-               ? const HarmonySecureKeyStorage()
-               : const FlutterSecureKeyStorage());
+  }) : _storage = storage ?? defaultSecureKeyStorage();
 
   static final SecureKeyProvider instance = SecureKeyProvider();
 
@@ -108,7 +43,8 @@ class SecureKeyProvider {
   /// treated as unavailable. The platform channel normally answers in
   /// milliseconds; without a bound, a wedged Keystore — or, in widget tests,
   /// an unmocked channel whose Future never resolves — would hang startup
-  /// forever instead of letting callers degrade.
+  /// forever instead of letting callers degrade. Linux deliberately waits for
+  /// completion under the process writer lock to avoid late key writes.
   final Duration storageTimeout;
 
   /// Cooldown after a failed key load: lookups within one startup return the
@@ -138,7 +74,12 @@ class SecureKeyProvider {
 
   Future<Uint8List?> _loadOrCreate(String name) async {
     try {
-      final stored = await _storage.read(name).timeout(storageTimeout);
+      final read = _storage.read(name);
+      // Linux key operations retain ownership until completion; a timed-out
+      // write must never race a retry which creates a different key.
+      final stored = await (defaultTargetPlatform == TargetPlatform.linux
+          ? read
+          : read.timeout(storageTimeout));
       if (stored != null) {
         try {
           final decoded = base64Decode(stored);
@@ -148,14 +89,21 @@ class SecureKeyProvider {
             return bytes;
           }
         } catch (_) {
-          /* Preserve the entry and all data encrypted by it. */
+          // Preserve invalid keys and all data encrypted by them.
         }
-        throw const FormatException(
-          'Stored encryption key is invalid; refusing replacement',
-        );
+      }
+      if (stored != null) {
+        throw StateError('密钥损坏，拒绝替换现有密钥');
       }
       final fresh = Uint8List.fromList(Hive.generateSecureKey());
-      await _storage.write(name, base64Encode(fresh)).timeout(storageTimeout);
+      final write = _storage.write(name, base64Encode(fresh));
+      await (defaultTargetPlatform == TargetPlatform.linux
+          ? write
+          : write.timeout(storageTimeout));
+      if (defaultTargetPlatform == TargetPlatform.linux &&
+          await _storage.read(name) != base64Encode(fresh)) {
+        throw StateError('Linux 密钥写入确认失败');
+      }
       _cache[name] = fresh;
       return fresh;
     } catch (_) {

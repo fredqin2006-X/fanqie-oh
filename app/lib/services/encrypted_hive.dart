@@ -1,7 +1,7 @@
 import 'dart:io';
+import 'package:flutter/foundation.dart';
 
 import 'package:hive_ce/hive.dart';
-import 'package:flutter/foundation.dart';
 
 import 'app_log.dart';
 import 'secure_key_provider.dart';
@@ -113,6 +113,7 @@ class EncryptedHive {
     final key = await (keys ?? SecureKeyProvider.instance).getOrCreateKey();
     if (key == null) {
       if (requireEncryption ||
+          defaultTargetPlatform == TargetPlatform.linux ||
           (!kIsWeb && Platform.operatingSystem == 'ohos')) {
         throw StateError('加密密钥不可用，拒绝以明文打开 $name');
       }
@@ -142,7 +143,10 @@ class EncryptedHive {
         await _reconcileLegacy(hive, name, box);
         return box;
       } on HiveError catch (e) {
-        if (!_looksLikeDecryptionFailure(e)) rethrow;
+        if (defaultTargetPlatform == TargetPlatform.linux ||
+            !_looksLikeDecryptionFailure(e)) {
+          rethrow;
+        }
         if (!kIsWeb && Platform.operatingSystem == 'ohos') {
           throw StateError('加密数据不可读，已保留原文件，请恢复密钥或备份后重试');
         }
@@ -208,7 +212,7 @@ class EncryptedHive {
 
     final key = await (keys ?? SecureKeyProvider.instance).getOrCreateKey();
     if (key == null) {
-      if (requireEncryption) {
+      if (requireEncryption || defaultTargetPlatform == TargetPlatform.linux) {
         throw StateError('加密密钥不可用，拒绝以明文打开 $name');
       }
       if (_encryptedBoxOnDisk(encName)) {
@@ -227,7 +231,10 @@ class EncryptedHive {
           compactionStrategy: strategy,
         );
       } on HiveError catch (e) {
-        if (!_looksLikeDecryptionFailure(e)) rethrow;
+        if (defaultTargetPlatform == TargetPlatform.linux ||
+            !_looksLikeDecryptionFailure(e)) {
+          rethrow;
+        }
         final preserved = _quarantineUnreadableBox(encName);
         if (preserved.isEmpty) {
           AppLog.w('hive', '加密箱 $encName 无法解密，且未找到可保留的箱文件');

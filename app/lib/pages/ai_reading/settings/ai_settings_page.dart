@@ -22,6 +22,7 @@ import 'ai_provider_page.dart';
 import 'ai_rate_page.dart';
 import 'ai_settings_widgets.dart';
 import 'ai_usage_page.dart';
+import 'developer_tools_page.dart';
 
 /// Global AI reading settings: consent, provider, display, prompt, prefetch
 /// and budget. Book-level overrides live in [AiBookSettingsPage].
@@ -116,36 +117,23 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
     await _saveGlobal(_settings.global.copyWith(enabled: true));
   }
 
+  /// Withdraws the consent that was granted when the AI master switch was first
+  /// enabled. Granting stays in that dialog, so no second consent entry exists.
   Future<void> _toggleConsent() async {
-    if (_settings.device.cloudConsent) {
-      final confirmed = await showSettingsConfirmDialog(
-        context: context,
-        title: '撤回云端正文传输同意？',
-        message: '撤回后不会再发起新请求；已保存的校对结果仍可查看。',
-        confirmLabel: '撤回同意',
-        destructive: true,
-      );
-      if (!confirmed) return;
-      try {
-        await _controller.setCloudConsent(false);
-      } catch (error) {
-        if (!mounted) return;
-        aiShowSnack(context, '撤回失败：$error');
-      }
-      return;
-    }
-    final profile = _settings.provider(_settings.global.providerId);
-    final agreed = await showAiConsentDialog(
-      context,
-      host: profile?.host ?? '尚未配置的提供商',
-      model: _settings.global.modelId,
+    if (!_settings.device.cloudConsent) return;
+    final confirmed = await showSettingsConfirmDialog(
+      context: context,
+      title: '撤回云端正文传输同意？',
+      message: '撤回后不会再发起新请求；已保存的校对结果仍可查看。',
+      confirmLabel: '撤回同意',
+      destructive: true,
     );
-    if (!agreed) return;
+    if (!confirmed) return;
     try {
-      await _controller.setCloudConsent(true);
+      await _controller.setCloudConsent(false);
     } catch (error) {
       if (!mounted) return;
-      aiShowSnack(context, '保存云端同意失败：$error');
+      aiShowSnack(context, '撤回失败：$error');
     }
   }
 
@@ -196,10 +184,78 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
     if (mounted) setState(() => _probeResult = null);
   }
 
-  Future<void> _openProviders() async {
-    await Navigator.of(
+  /// The stored value normalised to one of the three option keys.
+  ///
+  /// Anything unknown reads as the dotted default - the same normalisation
+  /// the old `DropdownButton`'s `value:` did, so a legacy or damaged setting
+  /// still highlights a row in the picker instead of leaving it unselected.
+  static String _markStyleKey(String style) => switch (style) {
+    'off' => 'off',
+    'solid' => 'solid',
+    _ => 'dotted',
+  };
+
+  /// The label of the 「修改标记」 row.
+  ///
+  /// The stored value has three shapes - `off`, `solid` and anything else for
+  /// the dotted default - and the row shows the same words the picker offers.
+  static String _markStyleLabel(String style) => switch (style) {
+    'off' => '关闭',
+    'solid' => '实线',
+    _ => '低对比点线',
+  };
+
+  /// Picks the 「修改标记」 style.
+  ///
+  /// This uses the shared choice dialog like every other AI setting, so the
+  /// row reads the same as its neighbours. A `DropdownButton` here drew its
+  /// own 2dp menu on the canvas colour, which made this one row look like a
+  /// different control from the "播放页布局" picker beside it.
+  Future<void> _pickMarkStyle(BuildContext context, String current) async {
+    const options = [
+      (key: 'dotted', label: '低对比点线'),
+      (key: 'solid', label: '实线'),
+      (key: 'off', label: '关闭'),
+    ];
+    final choice = await showAiChoiceDialog(
       context,
-    ).push<bool>(MaterialPageRoute(builder: (_) => const AiProviderPage()));
+      title: '修改标记',
+      options: [
+        for (final option in options)
+          (
+            key: option.key,
+            label: option.label,
+            selected: option.key == _markStyleKey(current),
+          ),
+      ],
+    );
+    if (choice == null || !mounted) return;
+    await _saveGlobal(_settings.global.copyWith(markStyle: choice));
+  }
+
+  /// Picks the 「预校对范围」 chapter count.
+  Future<void> _pickPrefetchRange(BuildContext context, int current) async {
+    final choice = await showAiChoiceDialog(
+      context,
+      title: '预校对范围',
+      options: [
+        for (final count in const [1, 2, 3])
+          (
+            key: '$count',
+            label: '$count 章',
+            selected: count == current.clamp(1, 3),
+          ),
+      ],
+    );
+    if (choice == null || !mounted) return;
+    final count = int.tryParse(choice);
+    if (count == null) return;
+    await _saveGlobal(_settings.global.copyWith(maxPrefetchChapters: count));
+  }
+
+  Future<void> _openProviders() async {
+    await Navigator.of(context)
+        .push<bool>(MaterialPageRoute(builder: (_) => const AiProviderPage()));
     if (!mounted) return;
     final global = _settings.global;
     var profile = _settings.provider(global.providerId);
@@ -389,12 +445,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
     final subtitle = profile == null
         ? '尚未配置提供商'
         : '${profile.label}${model == null || model.isEmpty ? '' : '，$model'}，$status';
-    return Container(
-      decoration: BoxDecoration(
-        color: palette.surface,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: palette.line, width: 0.6),
-      ),
+    return SurfacePanel(
       padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -559,24 +610,11 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
         SettingsRow(
           icon: Icons.format_color_text,
           title: '修改标记',
-          trailing: DropdownButtonHideUnderline(
-            child: DropdownButton<String>(
-              value: global.markStyle == 'off'
-                  ? 'off'
-                  : global.markStyle == 'solid'
-                  ? 'solid'
-                  : 'dotted',
-              items: const [
-                DropdownMenuItem(value: 'dotted', child: Text('低对比点线')),
-                DropdownMenuItem(value: 'solid', child: Text('实线')),
-                DropdownMenuItem(value: 'off', child: Text('关闭')),
-              ],
-              onChanged: (value) {
-                if (value == null) return;
-                _saveGlobal(_settings.global.copyWith(markStyle: value));
-              },
-            ),
-          ),
+          // The same picker the other AI settings use. A raw `DropdownButton`
+          // drew its own 2dp menu on the canvas colour, so this row looked
+          // like a different control from the "播放页布局" picker next to it.
+          value: _markStyleLabel(global.markStyle),
+          onTap: () => _pickMarkStyle(context, global.markStyle),
         ),
       ],
     );
@@ -586,6 +624,18 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
     final global = _settings.global;
     return SettingsGroupCard(
       children: [
+        SettingsRow(
+          icon: Icons.text_fields,
+          title: '去屏蔽词',
+          subtitle: '根据上下文补全屏蔽词和谐音替换词',
+          trailing: SettingsSwitch(
+            value: global.restoreCensoredWords,
+            onChanged: (value) => _saveGlobal(
+              _settings.global.copyWith(restoreCensoredWords: value),
+            ),
+            semanticLabel: '去屏蔽词',
+          ),
+        ),
         SettingsRow(
           icon: Icons.article_outlined,
           title: '提示词',
@@ -618,22 +668,8 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
         SettingsRow(
           icon: Icons.format_list_numbered,
           title: '预校对范围',
-          trailing: DropdownButtonHideUnderline(
-            child: DropdownButton<int>(
-              value: global.maxPrefetchChapters.clamp(1, 3),
-              items: const [
-                DropdownMenuItem(value: 1, child: Text('1 章')),
-                DropdownMenuItem(value: 2, child: Text('2 章')),
-                DropdownMenuItem(value: 3, child: Text('3 章')),
-              ],
-              onChanged: (value) {
-                if (value == null) return;
-                _saveGlobal(
-                  _settings.global.copyWith(maxPrefetchChapters: value),
-                );
-              },
-            ),
-          ),
+          value: '${global.maxPrefetchChapters.clamp(1, 3)} 章',
+          onTap: () => _pickPrefetchRange(context, global.maxPrefetchChapters),
         ),
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 10, 16, 8),
@@ -841,35 +877,31 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
     return SettingsGroupCard(
       children: [
         SettingsRow(
-          icon: Icons.cloud_outlined,
-          title: '云端正文传输',
-          subtitle: '隐私同意，不是日常开关',
-          trailing: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                consented ? '已同意' : '未同意',
-                style: TextStyle(
-                  fontSize: 13,
-                  color: HomePalette.of(context).muted,
-                ),
-              ),
-              TextButton(
-                onPressed: _toggleConsent,
-                style: TextButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                  minimumSize: const Size(0, 32),
-                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                ),
-                child: Text(consented ? '撤回' : '去同意'),
-              ),
-            ],
+          icon: Icons.science_outlined,
+          title: 'AI 测试台',
+          subtitle: '样例测试、JSON 校验与请求预览',
+          onTap: () => Navigator.push(
+            context,
+            MaterialPageRoute<void>(builder: (_) => const DeveloperToolsPage()),
           ),
         ),
+        if (consented)
+          SettingsRow(
+            icon: Icons.cloud_outlined,
+            title: '正文上传授权',
+            trailing: TextButton(
+              onPressed: _toggleConsent,
+              style: TextButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                minimumSize: const Size(0, 32),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              child: const Text('撤销'),
+            ),
+          ),
         SettingsRow(
           icon: Icons.inventory_2_outlined,
           title: 'AI 数据备份',
-          value: '包含',
           onTap: () => Navigator.of(context).push<void>(
             MaterialPageRoute(builder: (_) => const LibraryBackupPage()),
           ),

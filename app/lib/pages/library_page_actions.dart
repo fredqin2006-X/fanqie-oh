@@ -203,7 +203,10 @@ mixin _LibraryPageActions on _LibraryPageStateBase {
   }
 
   void _openSearch() {
-    Navigator.push(context, SearchRoute(builder: (_) => const SearchPage()));
+    Navigator.push(
+      context,
+      SearchRoute.open<void>(context, builder: (_) => const SearchPage()),
+    );
   }
 
   /// 优先用缓存续读；未命中时保留离线阅读与详情页加载入口。
@@ -411,7 +414,9 @@ mixin _LibraryPageActions on _LibraryPageStateBase {
 
   /// 非编辑态长按条目：触感反馈后进编辑态并选中该项。
   void _longPress(_ShelfEntry entry) {
-    HapticFeedback.mediumImpact();
+    if (HapticPreferences.instance.value) {
+      HapticFeedback.mediumImpact();
+    }
     _enterEdit(entry);
   }
 
@@ -523,13 +528,17 @@ mixin _LibraryPageActions on _LibraryPageStateBase {
     });
     try {
       await ShelfStore.instance.removeKeys(keys);
-      for (final entry in localEntries) {
-        // D-M8: 分组仓库未就绪或写失败都不能阻断本地文件删除。
+      if (localEntries.isNotEmpty) {
+        // Clean every removed identity before slow or unavailable file I/O.
         try {
-          await ShelfGroupStore.instance.removeAssignments([entry.contentKey]);
+          await ShelfGroupStore.instance.removeAssignments(
+            localEntries.map((entry) => entry.contentKey),
+          );
         } catch (error, stack) {
           AppLog.w('shelf', '清理本地书分组失败', error: error, stack: stack);
         }
+      }
+      for (final entry in localEntries) {
         try {
           await ImportedBookStore.instance.deleteBook(entry.item.id);
         } catch (_) {}

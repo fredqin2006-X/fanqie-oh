@@ -12,6 +12,7 @@ import 'package:lottie/lottie.dart';
 import '../models/audio_extra.dart';
 import '../models/media_item.dart';
 import '../services/episode_source_cache.dart';
+import '../services/haptic_preferences.dart';
 import '../services/native_player.dart';
 import '../services/playback_format.dart';
 import '../platform/player_gesture_device.dart';
@@ -1476,7 +1477,9 @@ class _VideoPlayerChromeState extends State<VideoPlayerChrome>
       return;
     }
     _hideTimer?.cancel();
-    HapticFeedback.lightImpact();
+    if (HapticPreferences.instance.value) {
+      HapticFeedback.lightImpact();
+    }
     setState(() => _boosting = true);
     unawaited(_control((player) => player.setRate(2)));
   }

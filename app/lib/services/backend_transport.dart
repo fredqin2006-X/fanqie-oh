@@ -341,14 +341,17 @@ class RustBackendTransport implements BackendTransport {
           final poolKey = await SecureKeyProvider().devicePoolKey();
           checkCurrent();
           final harmony = !kIsWeb && Platform.operatingSystem == 'ohos';
-          if (harmony && poolKey == null) {
+          if ((harmony || defaultTargetPlatform == TargetPlatform.linux) &&
+              poolKey == null) {
             throw StateError('设备池加密密钥不可用，已保留既有数据');
           }
           if (poolKey != null) {
             try {
               await rust.setDevicePoolKey(key: poolKey);
             } catch (_) {
-              if (harmony) rethrow;
+              if (harmony || defaultTargetPlatform == TargetPlatform.linux) {
+                rethrow;
+              }
               // Keep starting: the pool falls back to plaintext + a warning.
             }
             checkCurrent();

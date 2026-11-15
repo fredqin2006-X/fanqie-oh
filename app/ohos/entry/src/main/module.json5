@@ -6,7 +6,8 @@
     "description": "$string:module_desc",
     "mainElement": "EntryAbility",
     "deviceTypes": [
-      "phone"
+      "phone",
+      "tablet"
     ],
     "deliveryWithInstall": true,
     "installationFree": false,
@@ -21,6 +22,8 @@
         "startWindowIcon": "$media:icon",
         "startWindowBackground": "$color:start_window_background",
         "exported": true,
+        "orientation": "auto_rotation_restricted",
+        "supportWindowMode": ["fullscreen", "split", "floating"],
         "backgroundModes": ["audioPlayback"],
         "skills": [
           {

@@ -28,6 +28,7 @@ pub mod error;
 pub mod filter;
 pub mod json;
 pub mod harmony_media;
+mod network;
 pub mod server;
 pub mod sign;
 pub mod static_files;
@@ -36,7 +37,10 @@ pub mod upstream;
 
 mod frb_generated;
 
-#[cfg(target_os = "windows")]
+#[cfg(test)]
+mod network_proxy_tests;
+
+#[cfg(any(target_os = "windows", all(target_os = "linux", not(target_env = "ohos"))))]
 mod desktop_fetch;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", all(target_os = "linux", not(target_env = "ohos"))))]
 mod desktop_media;

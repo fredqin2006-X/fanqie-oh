@@ -59,3 +59,6 @@
 # OS files.
 .DS_Store
 Thumbs.db
+
+# Local emulator captures.
+/.clawbench/generated/

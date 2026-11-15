@@ -22,6 +22,10 @@ export class SecureKeyPlugin implements FlutterPlugin, MethodCallHandler {
   private readonly base64: util.Base64Helper = new util.Base64Helper();
   private readonly encoder: util.TextEncoder = new util.TextEncoder();
 
+  private isCredential(key: string): boolean {
+    return /^fqapp_ai_credential_[A-Za-z0-9_-]{1,128}$/.test(key) || key === 'fqapp.webdav.config.v1';
+  }
+
   getUniqueClassName(): string { return 'FqSecureKeyPlugin'; }
   onAttachedToEngine(binding: FlutterPluginBinding): void {
     this.context = binding.getApplicationContext();
@@ -41,7 +45,7 @@ export class SecureKeyPlugin implements FlutterPlugin, MethodCallHandler {
         const context = this.context;
         if (!context) { throw new Error('SECURE_ENGINE_DETACHED'); }
         const key = call.argument('key') as string;
-        const credential = typeof key === 'string' && /^fqapp_ai_credential_[A-Za-z0-9_-]{1,128}$/.test(key);
+        const credential = typeof key === 'string' && this.isCredential(key);
         if (!credential && key !== 'fqapp_hive_encryption_key_v1' && key !== 'fqapp_device_pool_key_v1') {
           throw new Error('SECURE_KEY_NAME_INVALID');
         }
@@ -92,7 +96,7 @@ export class SecureKeyPlugin implements FlutterPlugin, MethodCallHandler {
     }
     const nonce = this.base64.decodeSync(record.nonce);
     const ciphertext = this.base64.decodeSync(record.ciphertext);
-    const credential = key.startsWith('fqapp_ai_credential_');
+    const credential = this.isCredential(key);
     if (nonce.length !== 12 || (credential ?
       ciphertext.length < 17 || ciphertext.length > 8208 : ciphertext.length !== 60)) {
       throw new Error('SECURE_RECORD_INVALID');

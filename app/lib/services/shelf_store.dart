@@ -3,6 +3,7 @@ import 'package:hive_ce/hive.dart';
 
 import '../models/media_item.dart';
 import '../models/shelf_identity.dart';
+import '../models/shuqi_book.dart';
 import 'encrypted_hive.dart';
 
 /// One 加入书架 record.
@@ -64,8 +65,56 @@ class ShelfStore {
 
   Future<void> init() async {
     if (_openBox != null) return;
-    _box = await EncryptedHive.openBox<dynamic>(Hive, boxName);
+    final box = await EncryptedHive.openBox<dynamic>(Hive, boxName);
+    await _migrateShuqiReaderEntries(box);
+    _box = box;
     _revision.value++;
+  }
+
+  Future<void> _migrateShuqiReaderEntries(Box<dynamic> box) async {
+    final readerId = RegExp(r'^shuqi:([0-9]+)$');
+    final additions = <String, dynamic>{};
+    final oldKeys = <String>[];
+    for (final key in box.keys) {
+      final raw = box.get(key);
+      if (key is! String || raw is! Map || raw['kind'] != 'book') continue;
+      final id = raw['id'];
+      if (id is! String || key != keyFor('book', id)) continue;
+      final bookId = readerId.firstMatch(id)?.group(1);
+      if (bookId == null || !ShelfIdentity.isValidContentId(bookId)) continue;
+      if ((raw['source'] != null && raw['source'] != ShelfIdentity.fanqie) ||
+          raw['seriesId'] != null ||
+          raw['episodeId'] != null) {
+        continue;
+      }
+      final target = keyFor('book', bookId, source: shuqiSourceId);
+      if (box.containsKey(target)) {
+        final existing = box.get(target);
+        final item = existing is Map
+            ? _itemFrom(existing, storageKey: target)
+            : null;
+        if (item == null ||
+            item.id != bookId ||
+            item.kind != 'book' ||
+            !isShuqiItem(item) ||
+            item.seriesId != null ||
+            item.episodeId != null) {
+          continue;
+        }
+      } else {
+        additions[target] = {...raw, 'id': bookId, 'source': shuqiSourceId};
+      }
+      oldKeys.add(key);
+    }
+    if (oldKeys.isNotEmpty) {
+      // Older readers saved their session ID as a fanqie shelf entry (#270).
+      // Keep addedAt and any canonical record; flush before removing old keys
+      // so an interrupted migration can retry without losing the book.
+      if (additions.isNotEmpty) await box.putAll(additions);
+      await box.flush();
+      await box.deleteAll(oldKeys);
+    }
+    await box.flush();
   }
 
   bool contains(String kind, String id, {String source = 'fanqie'}) {
@@ -176,6 +225,44 @@ class ShelfStore {
       _revision.value++;
     }
     return missing.length;
+  }
+
+  /// Apply a remote shelf only where it still matches the snapshot taken
+  /// before networking. A tap made during the request keeps its local result.
+  Future<void> applySyncedShelf({
+    required List<ShelfRecord> before,
+    required List<ShelfRecord> incoming,
+  }) async {
+    final box = _openBox;
+    if (box == null) throw StateError('书架尚未初始化');
+    final expected = {for (final entry in before) keyOf(entry.item): entry};
+    final target = {for (final entry in incoming) keyOf(entry.item): entry};
+    bool unchanged(String key) {
+      final raw = box.get(key);
+      final old = expected[key];
+      return old == null
+          ? raw == null
+          : raw is Map && _addedAt(raw) == old.addedAt;
+    }
+
+    final deleted = expected.keys
+        .where((key) => !target.containsKey(key) && unchanged(key))
+        .toList();
+    final writes = {
+      for (final entry in target.entries)
+        if (unchanged(entry.key))
+          entry.key: _recordOf(entry.value.item, entry.value.addedAt),
+    };
+    // Both Hive mutations enter memory before yielding; UI edits afterwards
+    // are later writes and will be picked up by the next sync.
+    final deleting = box.deleteAll(deleted);
+    final writing = box.putAll(writes);
+    try {
+      await Future.wait([deleting, writing]);
+      await box.flush();
+    } finally {
+      _revision.value++;
+    }
   }
 
   /// Reuses the same shelf keys and card model. Enrich existing cards while
