@@ -29,6 +29,17 @@ import 'home_rank_scroll_physics.dart';
 
 const double _shelfMaxWidth = 1120;
 const double _shelfBaseWidth = 520;
+const double _shelfWideAnchorBreakpoint = 840;
+const double _shelfWideFocusFraction = 0.12;
+
+double _focusAnchorFractionForWidth(double width) {
+  final boundedWidth = math.min(width, _shelfMaxWidth);
+  final progress =
+      ((boundedWidth - _shelfBaseWidth) /
+              (_shelfWideAnchorBreakpoint - _shelfBaseWidth))
+          .clamp(0.0, 1.0);
+  return 0.5 + (_shelfWideFocusFraction - 0.5) * progress;
+}
 
 class _ShelfGeometry {
   const _ShelfGeometry({
@@ -82,6 +93,7 @@ class _ShelfGeometry {
     final height = math.min(naturalHeight, math.max(200.0, maxHeight));
     final scale = height / naturalHeight;
     final flatCover = (width * .29).clamp(96.0, 118.0);
+    final focusCenter = width * _focusAnchorFractionForWidth(width);
     return _ShelfGeometry(
       width: width,
       spine: spine,
@@ -89,7 +101,10 @@ class _ShelfGeometry {
       cover: cover,
       bodyHeight: bodyHeight,
       base: base,
-      anchor: (width / scale - spine - cover * 0.66) / 2 + cover * 0.84 * 0.66,
+      anchor:
+          focusCenter / scale -
+          (spine + cover * 0.66) / 2 +
+          cover * 0.84 * 0.66,
       height: height,
       scale: scale,
       flatHeight: math.max(
@@ -205,6 +220,10 @@ class HomeRankShelf extends StatefulWidget {
         _InfoRow.heightFor(scaler) +
         _Pager.heightFor(scaler);
   }
+
+  @visibleForTesting
+  static double focusAnchorFractionForWidth(double width) =>
+      _focusAnchorFractionForWidth(width);
 
   @override
   State<HomeRankShelf> createState() => _HomeRankShelfState();

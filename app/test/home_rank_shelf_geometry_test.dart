@@ -65,6 +65,17 @@ void main() {
   }
 
   group('archive shelf geometry', () {
+    test('the selected book moves left as the rail widens', () {
+      expect(HomeRankShelf.focusAnchorFractionForWidth(400), .5);
+      expect(HomeRankShelf.focusAnchorFractionForWidth(520), .5);
+      expect(
+        HomeRankShelf.focusAnchorFractionForWidth(680),
+        closeTo(.31, .001),
+      );
+      expect(HomeRankShelf.focusAnchorFractionForWidth(880), .12);
+      expect(HomeRankShelf.focusAnchorFractionForWidth(1440), .12);
+    });
+
     testWidgets(
       'the tablet rail spreads across width and caps ultrawide windows',
       (tester) async {
