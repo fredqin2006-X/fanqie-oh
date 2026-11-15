@@ -15,9 +15,7 @@ List<Chapter> autoCacheEpisodes({
   if (ahead <= 0 || episodes.isEmpty) return const [];
   final start = currentIndex + 1;
   if (start <= 0 || start >= episodes.length) return const [];
-  final end = start + ahead > episodes.length
-      ? episodes.length
-      : start + ahead;
+  final end = start + ahead > episodes.length ? episodes.length : start + ahead;
   return episodes.sublist(start, end);
 }
 
@@ -36,8 +34,11 @@ class DramaCachePreferences {
   static const _wifiOnlyKey = 'drama_auto_cache_wifi_only';
   static const _heightKey = 'drama_download_max_height';
 
-  /// 默认往后缓存 5 集。
-  static const int defaultAhead = 5;
+  /// 默认关闭；用户主动开启后才安排自动缓存。
+  static const int defaultAhead = 0;
+
+  /// 主动开启且尚未选择集数时，往后缓存 5 集。
+  static const int defaultEnabledAhead = 5;
 
   /// 面板上可选的档位，0 = 关闭。
   static const List<int> presetAheads = [0, 3, 5, 10];
@@ -71,9 +72,7 @@ class DramaCachePreferences {
     try {
       final sp = await SharedPreferences.getInstance();
       final stored = sp.getInt(_aheadKey);
-      ahead.value = stored == null
-          ? defaultAhead
-          : stored.clamp(0, 50);
+      ahead.value = stored == null ? defaultAhead : stored.clamp(0, 50);
       wifiOnly.value = sp.getBool(_wifiOnlyKey) ?? true;
       downloadHeight.value = sp.getInt(_heightKey) ?? 0;
     } catch (_) {

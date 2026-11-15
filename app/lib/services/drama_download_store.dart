@@ -102,15 +102,18 @@ class CachedEpisode {
 
   /// 离线回放的取流结果：主 url 是 `file://` 标记（原生播放器据此走
   /// 本地文件桥 + 同一把 key 解密），variants 只带下载时选定的那一档。
-  EpisodeSource toSource() => EpisodeSource('file://$filePath', keyHex, [
-    if (variantName.isNotEmpty)
-      EpisodeVariant(
-        name: variantName,
-        url: 'file://$filePath',
-        keyHex: keyHex,
-        height: height,
-      ),
-  ]);
+  EpisodeSource toSource() {
+    final url = Uri.file(filePath).toString();
+    return EpisodeSource(url, keyHex, [
+      if (variantName.isNotEmpty)
+        EpisodeVariant(
+          name: variantName,
+          url: url,
+          keyHex: keyHex,
+          height: height,
+        ),
+    ]);
+  }
 }
 
 /// 一部剧的目录（剧名/封面/全集列表），下载启动时落库，管理页靠它自举，
@@ -420,8 +423,11 @@ class HiveDramaDownloadStore implements DramaDownloadStore {
   Future<CachedEpisode?> episode(String itemId) => _serialize((box) async {
     final raw = box.get(_episodeKey(itemId));
     if (!_isEpisode(raw)) return null;
-    final keyHex = box.get(_keyKey(itemId));
-    return CachedEpisode.fromMap(raw, keyHex: keyHex is String ? keyHex : '');
+    final keyHex =
+        box.get(_keyKey(itemId)) ?? (raw['keyHex'] == '' ? '' : null);
+    // 明文流明确保存空字符串；密钥条目丢失不能冒充明文流交给播放器。
+    if (keyHex is! String) return null;
+    return CachedEpisode.fromMap(raw, keyHex: keyHex);
   });
 
   @override

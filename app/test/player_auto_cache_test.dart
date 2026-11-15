@@ -33,9 +33,11 @@ void main() {
   late Completer<EpisodeSource> blocked;
   late List<ControlledNativePlayer> players;
 
-  setUp(() {
+  setUp(() async {
     SharedPreferences.setMockInitialValues({});
     DramaCachePreferences.instance.resetForTest();
+    await DramaCachePreferences.instance.load();
+    await DramaCachePreferences.instance.setAhead(5);
     QualityMemory.clearForTesting();
     // 目录直接用系统临时目录：下载器一进 _runOnce 就先问目录，测试里不必
     // 真建临时目录，也不会走到真正的取流与网络。
@@ -58,7 +60,10 @@ void main() {
 
   void mockConnectivity(List<String> results) {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(_connectivityChannel, (call) async => results);
+        .setMockMethodCallHandler(
+          _connectivityChannel,
+          (call) async => results,
+        );
   }
 
   void mockConnectivityError() {
@@ -103,6 +108,15 @@ void main() {
     await _flush(tester);
   }
 
+  testWidgets('自动缓存关闭时 Wi-Fi 首帧也不安排下载', (tester) async {
+    await DramaCachePreferences.instance.setAhead(0);
+    mockConnectivity(['wifi']);
+    await mount(tester, loader: (chapter) async => _source(chapter.itemId));
+    await tester.pump(const Duration(seconds: 2));
+    await _flush(tester);
+    expect(downloader.value, isEmpty);
+  });
+
   testWidgets('测不出网络形态时不动自动缓存', (tester) async {
     // 平台通道报错时 currentConnectivity() 报「在线且不计费」——那是给
     // 手动下载入口的（不能把入口误关死）。自动缓存没有流量确认兜底，
@@ -131,11 +145,7 @@ void main() {
     await tester.pump(const Duration(seconds: 2));
     await _flush(tester);
 
-    expect(
-      downloader.value,
-      isNotEmpty,
-      reason: '早退的那一次不该把这一集永久记成「已排过」',
-    );
+    expect(downloader.value, isNotEmpty, reason: '早退的那一次不该把这一集永久记成「已排过」');
     expect(downloader.value.first.auto, isTrue);
   });
 

@@ -9,8 +9,8 @@ extension _PlayerPagePreload on _PlayerPageState {
   /// 边看边往后缓存：这一集出画面后，把后面几集排进离线下载队列，
   /// 断网 / 信号差的时候也能接着看。
   ///
-  /// 与小说阅读时预取前后各一章同构，区别是短剧一集几十 MB，所以默认
-  /// 限 Wi-Fi、限 5 集，并且只保留最近的一段（见 [_trimAutoCache]）。
+  /// 短剧一集几十 MB，默认关闭；用户开启后限 Wi-Fi，并且只保留最近
+  /// 的一段（见 [_trimAutoCache]）。
   /// 用户手动下载的一律不碰：那批记录的 `auto` 是 false。
   void _scheduleAutoCache(NativePlayer player) {
     if (!widget.shortSeries || widget.bookId.isEmpty) return;
@@ -173,6 +173,9 @@ extension _PlayerPagePreload on _PlayerPageState {
   /// 链路重新取流（失败了还有 [_retrySilently] 兜底）。
   void _discardWarm(_WarmEpisode warm) {
     if (!identical(_warm, warm)) return;
+    if (warm.source?.url case final String url when url.startsWith('file:')) {
+      _failedOfflineSources.add(url);
+    }
     _sources.invalidate(warm.itemId);
     _dropWarm();
   }

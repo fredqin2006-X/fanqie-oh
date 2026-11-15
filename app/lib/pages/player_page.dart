@@ -161,6 +161,8 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
   final List<StreamSubscription<dynamic>> _subs = [];
   Future<void> _releases = Future<void>.value();
   late final EpisodeSourceCache _sources;
+  // 本次播放会话中失败的本地源，联网时绕开，避免重试仍命中坏缓存。
+  final Set<String> _failedOfflineSources = {};
 
   DramaDownloadStore get _downloadStore =>
       widget.store ?? HiveDramaDownloadStore.instance;
@@ -1484,6 +1486,10 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
       _ => null,
     };
     _loadTrace?.fail(errorCode: errorCode, httpStatusCode: httpStatusCode);
+    if (_currentSource?.url case final String url
+        when url.startsWith('file:')) {
+      _failedOfflineSources.add(url);
+    }
     _sources.invalidate(widget.eps[_index].itemId);
     if (error is! OfflineEpisodeUnavailable && _retrySilently()) return;
     _prefetchTimer?.cancel();
@@ -1896,7 +1902,7 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
   }
 
   /// 已缓存的集 → 本地取流结果（`file://` + keyHex，回放时原生层从磁盘
-  /// 读加密字节解密）；记录在但文件被清掉则返回 null 回退在线。
+  /// 读加密字节解密）；文件丢失、长度不符，或联网时已起播失败则回退在线。
   ///
   /// store 未就绪（Hive 未初始化的测试环境）直接跳过，不触碰 openBox。
   Future<EpisodeSource?> _offlineSource(Chapter episode) async {
@@ -1905,8 +1911,18 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
     try {
       final cached = await store.episode(episode.itemId);
       if (cached == null) return null;
-      if (!File(cached.filePath).existsSync()) return null;
-      return cached.toSource();
+      final stat = File(cached.filePath).statSync();
+      if (stat.type != FileSystemEntityType.file ||
+          stat.size <= 0 ||
+          stat.size != cached.bytes) {
+        return null;
+      }
+      final source = cached.toSource();
+      if (_failedOfflineSources.contains(source.url) &&
+          (await currentConnectivity()).online) {
+        return null;
+      }
+      return source;
     } catch (_) {
       return null;
     }

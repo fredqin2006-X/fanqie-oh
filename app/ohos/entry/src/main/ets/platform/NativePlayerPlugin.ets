@@ -3,6 +3,7 @@ import { FlutterPlugin, FlutterPluginBinding, MethodCall, MethodCallHandler, Met
 import { media } from '@kit.MediaKit';
 import { audio } from '@kit.AudioKit';
 import { http } from '@kit.NetworkKit';
+import { fileIo as fs } from '@kit.CoreFileKit';
 import { common } from '@kit.AbilityKit';
 import { window } from '@kit.ArkUI';
 import { BusinessError } from '@kit.BasicServicesKit';
@@ -263,6 +264,10 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
           opened.url !== item.base + '/harmony-media/' + opened.id) { throw new Error('INVALID_MEDIA_REPLY'); }
         item.sourceId = opened.id; playable = opened.url;
       } finally { request.destroy(); }
+    } else if (source.startsWith('file://')) {
+      // AVPlayer accepts fd:// for local files; FFmpeg accepts the decoded path.
+      playable = decodeURIComponent(source.substring('file://'.length));
+      if (!playable.startsWith('/')) { throw new Error('INVALID_LOCAL_SOURCE'); }
     }
     if (item.disposed) { await this.releaseSource(item); return; }
     item.playable = playable;
@@ -328,7 +333,14 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
     });
     this.emit(item, 'buffering', true);
     item.stage = 'url';
-    player.url = playable;
+    if (source.startsWith('file://') && key.length === 0) {
+      const file = await fs.open(playable, fs.OpenMode.READ_ONLY);
+      if (item.disposed) { await fs.close(file); return; }
+      item.file = file.fd;
+      player.url = 'fd://' + item.file;
+    } else {
+      player.url = playable;
+    }
   }
 
   private playerFailure(item: PlayerSession, error: Error, promise: boolean): void {
@@ -352,6 +364,7 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
     item.stage = 'software';
     const player = item.player; item.player = null;
     try { await player?.release(); } catch (_) { /* failed system decoder */ }
+    await this.closeFile(item);
     if (item.disposed || !item.texture) { return; }
     // Flutter uploads the latest software RGBA frame as an image. This avoids
     // the emulator's broken external-texture import and hybrid overlay slicing.
@@ -480,6 +493,7 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
     await this.releaseSource(item);
   }
   private async releaseSource(item: PlayerSession): Promise<void> {
+    await this.closeFile(item);
     const id = item.sourceId; item.sourceId = '';
     if (!id) { return; }
     const request = http.createHttp();
@@ -487,5 +501,9 @@ export class NativePlayerPlugin implements FlutterPlugin, MethodCallHandler, Str
       method: http.RequestMethod.DELETE, connectTimeout: 2000, readTimeout: 2000, usingCache: false
     }); } catch (_) { /* core shutdown also cancels every source */ }
     finally { request.destroy(); }
+  }
+  private async closeFile(item: PlayerSession): Promise<void> {
+    const fd = item.file; item.file = -1;
+    if (fd >= 0) { await fs.close(fd); }
   }
 }

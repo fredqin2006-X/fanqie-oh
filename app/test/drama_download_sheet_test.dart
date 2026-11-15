@@ -347,11 +347,17 @@ void main() {
     expect(chip('1080').selected, isFalse);
   });
 
-  testWidgets('边看边缓存默认 5 集，关掉后写回偏好', (tester) async {
+  testWidgets('边看边缓存默认关闭，主动开启为 5 集且能再次关闭', (tester) async {
     await pumpSheet(tester, episodeCount: 8, currentIndex: 1);
     final prefs = DramaCachePreferences.instance;
     expect(prefs.ahead.value, DramaCachePreferences.defaultAhead);
     expect(find.text('边看边缓存'), findsOneWidget);
+    expect(find.text('已关闭，手动缓存不受影响'), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('download-auto-cache-switch')));
+    await tester.pumpAndSettle();
+    expect(prefs.ahead.value, 5);
+    expect(find.byKey(const ValueKey('download-auto-ahead-5')), findsOneWidget);
 
     await tester.tap(find.byKey(const ValueKey('download-auto-cache-switch')));
     await tester.pumpAndSettle();
@@ -361,6 +367,7 @@ void main() {
   });
 
   testWidgets('画质/快捷/自动缓存选择器统一用 HomeChip', (tester) async {
+    await DramaCachePreferences.instance.setAhead(5);
     await pumpSheet(
       tester,
       episodeCount: 9,

@@ -48,8 +48,7 @@ void main() {
     bool auto = false,
   }) {
     final path =
-        filePath ??
-        '${videoDir.path}${Platform.pathSeparator}$itemId.mp4';
+        filePath ?? '${videoDir.path}${Platform.pathSeparator}$itemId.mp4';
     if (withFile && filePath == null) {
       File(path).writeAsBytesSync(List.filled(bytes, 1));
     }
@@ -99,6 +98,33 @@ void main() {
     expect(await store.episode('bad'), isNull);
   });
 
+  test('本地播放 URI 编码特殊字符并能还原文件路径', () async {
+    final cached = episode(itemId: 'ep #1%');
+    final source = cached.toSource();
+    expect(Uri.parse(source.url).toFilePath(), cached.filePath);
+    expect(source.variants.single.url, source.url);
+    expect(source.url, contains('%23'));
+    expect(source.url, contains('%25'));
+  });
+
+  test('缺失密钥条目不能当作明文缓存，明确保存的空密钥仍有效', () async {
+    await store.saveEpisode(episode());
+    final box = Hive.box<dynamic>('drama_download_v1_enc');
+    await box.delete('key:ep1');
+    expect(await store.episode('ep1'), isNull);
+    await box.put('key:ep1', '');
+    expect((await store.episode('ep1'))!.keyHex, isEmpty);
+  });
+
+  test('兼容旧格式中明确保存空密钥的明文缓存', () async {
+    final cached = episode();
+    await store.saveEpisode(cached);
+    final box = Hive.box<dynamic>('drama_download_v1_enc');
+    await box.delete('key:ep1');
+    await box.put('episode:ep1', {...cached.toMap(), 'keyHex': ''});
+    expect((await store.episode('ep1'))!.keyHex, isEmpty);
+  });
+
   test('dramas 按剧聚合、集按目录顺序排序、剧按最近缓存排序', () async {
     await store.ensureCatalogue(
       CachedDrama(
@@ -115,12 +141,8 @@ void main() {
     // 落在同一毫秒，`List.sort` 的比较返回 0 且不保证稳定——用真实时钟会
     // 变成偶发失败（CI 上实测到过 series1/series2 顺序反转）。这里直接钉死
     // 时间戳，让断言只依赖实现逻辑，不依赖计时精度。
-    await store.saveEpisode(
-      episode(itemId: 'ep1', index: 1, cachedAt: 1000),
-    );
-    await store.saveEpisode(
-      episode(itemId: 'ep2', index: 0, cachedAt: 2000),
-    );
+    await store.saveEpisode(episode(itemId: 'ep1', index: 1, cachedAt: 1000));
+    await store.saveEpisode(episode(itemId: 'ep2', index: 0, cachedAt: 2000));
     await store.saveEpisode(
       episode(itemId: 'ep9', seriesId: 'series2', cachedAt: 3000),
     );
@@ -154,15 +176,22 @@ void main() {
     );
     for (final (relative, number) in const [17, 13, 15, 14, 16].indexed) {
       await store.saveEpisode(
-        episode(itemId: 'ep$number', index: relative, cachedAt: 1000 + relative),
+        episode(
+          itemId: 'ep$number',
+          index: relative,
+          cachedAt: 1000 + relative,
+        ),
       );
     }
 
     final series1 = (await store.dramas()).single;
-    expect(
-      series1.episodes.map((e) => e.itemId).toList(),
-      ['ep13', 'ep14', 'ep15', 'ep16', 'ep17'],
-    );
+    expect(series1.episodes.map((e) => e.itemId).toList(), [
+      'ep13',
+      'ep14',
+      'ep15',
+      'ep16',
+      'ep17',
+    ]);
   });
 
   test('removeEpisode 连带删除视频文件', () async {

@@ -9,16 +9,25 @@ void main() {
     DramaCachePreferences.instance.resetForTest();
   });
 
-  test('默认往后缓存 5 集，且只在 Wi-Fi 下跑', () async {
+  test('默认关闭自动缓存，开启后仍只在 Wi-Fi 下跑', () async {
+    final prefs = DramaCachePreferences.instance;
+    expect(prefs.ahead.value, 0);
+    await prefs.load();
+    expect(prefs.ahead.value, 0);
+    expect(prefs.wifiOnly.value, isTrue);
+  });
+
+  test('主动开启的集数仍持久化，不被新的默认值覆盖', () async {
+    SharedPreferences.setMockInitialValues({'drama_auto_cache_ahead': 3});
     final prefs = DramaCachePreferences.instance;
     await prefs.load();
-    expect(prefs.ahead.value, 5);
-    expect(prefs.wifiOnly.value, isTrue);
+    expect(prefs.ahead.value, 3);
   });
 
   test('关掉后写回 0，重新加载仍是关', () async {
     final prefs = DramaCachePreferences.instance;
     await prefs.load();
+    await prefs.setAhead(5);
     await prefs.setAhead(0);
     expect(prefs.ahead.value, 0);
 

@@ -537,7 +537,7 @@ class _DramaDownloadSheetState extends State<DramaDownloadSheet> {
             value: enabled,
             onChanged: (value) async {
               await prefs.setAhead(
-                value ? DramaCachePreferences.defaultAhead : 0,
+                value ? DramaCachePreferences.defaultEnabledAhead : 0,
               );
               if (mounted) setState(() {});
             },

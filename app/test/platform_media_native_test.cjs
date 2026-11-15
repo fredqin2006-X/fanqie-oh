@@ -221,7 +221,8 @@ test('volume key bridge debounces holds, yields while inactive, and restores on 
 
 function nativePlayerFixture() {
   const players = [], softwares = [], events = [], pipCalls = [], seeks = [];
-  const state = { prepareGate: null };
+  const files = [], closedFiles = [], requests = [];
+  const state = { prepareGate: null, fileGate: null, fileError: false };
   class Channel { setMethodCallHandler() {} setStreamHandler() {} invokeMethod() {} }
   const dependencies = {
     '@ohos/flutter_ohos': { MethodChannel: Channel, EventChannel: Channel },
@@ -233,7 +234,17 @@ function nativePlayerFixture() {
         seek(position) { seeks.push(position); } };
       players.push(player); return player;
     } } },
-    '@kit.AudioKit': { audio: {} }, '@kit.NetworkKit': { http: {} },
+    '@kit.AudioKit': { audio: {} },
+    '@kit.CoreFileKit': { fileIo: { OpenMode: { READ_ONLY: 0 },
+      async open(path) { files.push(path); if (state.fileGate) await state.fileGate.promise;
+        if (state.fileError) throw new Error('FILE_MISSING'); return { fd: 41 }; },
+      async close(file) { closedFiles.push(typeof file === 'number' ? file : file.fd); } } },
+    '@kit.NetworkKit': { http: { RequestMethod: { POST: 'POST', DELETE: 'DELETE' }, HttpDataType: { STRING: 0 },
+      createHttp: () => ({ async request(url, options) {
+        requests.push([url, options]);
+        return { responseCode: 200, result: JSON.stringify({ id: 'a'.repeat(32),
+          url: url.replace(/\/open$/, '/' + 'a'.repeat(32)) }) };
+      }, destroy() {} }) } },
     '@kit.PerformanceAnalysisKit': { hilog: { info() {}, error() {} } },
     './BackgroundMedia': { BackgroundMedia: class { async stop() {} async update() {} } },
     './FloatingVideo': { FloatingVideo: class {
@@ -256,7 +267,7 @@ function nativePlayerFixture() {
   plugin.onAttachedToEngine({ getPlatformViewRegistry: () => ({ registerViewFactory() {} }),
     getTextureRegistry: () => textures, getBinaryMessenger() {} });
   plugin.onListen(null, { success: event => events.push(Object.fromEntries(event)) });
-  return { plugin, players, softwares, events, pipCalls, seeks, state };
+  return { plugin, players, softwares, events, pipCalls, seeks, state, files, closedFiles, requests };
 }
 async function readyNativePlayer(f, startPositionMs = 0) {
   const reply = await invoke(f.plugin, 'create', {
@@ -274,6 +285,64 @@ test('native player applies resume position before publishing readiness and reje
   const second = await readyNativePlayer(f, 11000);
   assert.deepEqual(f.seeks, [4200, 0]);
   await invoke(f.plugin, 'dispose', { id: second });
+});
+
+test('plain cached video uses a decoded local path and fd://, closing the descriptor after disposal', async () => {
+  const f = nativePlayerFixture();
+  const reply = await invoke(f.plugin, 'create', { cdnUrl: 'file:///data/cache/ep%20%231%25.mp4',
+    keyHex: '', videoDecoder: 'hardware' });
+  await tick();
+  assert.deepEqual(f.files, ['/data/cache/ep #1%.mp4']);
+  assert.equal(f.players[0].url, 'fd://41');
+  assert.deepEqual(f.closedFiles, []);
+  await invoke(f.plugin, 'dispose', { id: reply.get('playerId') });
+  assert.deepEqual(f.closedFiles, [41]);
+});
+
+test('cached encrypted video retains the CENC bridge rather than exposing encrypted bytes to AVPlayer', async () => {
+  const f = nativePlayerFixture(), base = 'http://127.0.0.1:1234/_session/abcd';
+  const reply = await invoke(f.plugin, 'create', { cdnUrl: 'file:///data/cache/ep.mp4',
+    keyHex: '00112233445566778899aabbccddeeff', loopbackBase: base });
+  await tick();
+  assert.equal(f.players[0].url, base + '/harmony-media/' + 'a'.repeat(32));
+  assert.deepEqual(f.files, []);
+  assert.equal(JSON.parse(f.requests[0][1].extraData).cdnUrl, 'file:///data/cache/ep.mp4');
+  await invoke(f.plugin, 'dispose', { id: reply.get('playerId') });
+  assert.equal(f.requests.at(-1)[1].method, 'DELETE');
+});
+
+test('leaving during local file opening closes the late descriptor without setting a released player URL', async () => {
+  const f = nativePlayerFixture(); f.state.fileGate = deferred();
+  const reply = await invoke(f.plugin, 'create', { cdnUrl: 'file:///data/cache/ep.mp4', keyHex: '' });
+  await tick();
+  await invoke(f.plugin, 'dispose', { id: reply.get('playerId') });
+  f.state.fileGate.resolve(); await tick();
+  assert.deepEqual(f.closedFiles, [41]);
+  assert.equal(f.players[0].url, undefined);
+});
+
+test('cached video releases its descriptor when falling back to software, which receives a local path', async () => {
+  const f = nativePlayerFixture();
+  const reply = await invoke(f.plugin, 'create', { cdnUrl: 'file:///data/cache/ep%20one.mp4', keyHex: '' });
+  await tick();
+  const player = f.players[0];
+  player.listeners.get('stateChange')('initialized');
+  player.listeners.get('error')({ code: 5400106 });
+  await tick();
+  assert.deepEqual(f.closedFiles, [41]);
+  assert.deepEqual(f.softwares, ['/data/cache/ep one.mp4']);
+  await invoke(f.plugin, 'dispose', { id: reply.get('playerId') });
+  assert.deepEqual(f.closedFiles, [41]);
+});
+
+test('missing local file reports a player error without assigning a file:// source', async () => {
+  const f = nativePlayerFixture(); f.state.fileError = true;
+  const reply = await invoke(f.plugin, 'create', { cdnUrl: 'file:///data/cache/missing.mp4', keyHex: '' });
+  await tick();
+  assert.equal(f.events.some(event => event.type === 'error'), true);
+  assert.equal(f.players[0].url, undefined);
+  await invoke(f.plugin, 'dispose', { id: reply.get('playerId') });
+  assert.deepEqual(f.closedFiles, []);
 });
 test('PiP owner retirement fences delayed starts and old commands cannot stop the current owner', async () => {
   const f = nativePlayerFixture(), id = await readyNativePlayer(f);
