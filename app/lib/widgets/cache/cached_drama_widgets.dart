@@ -57,7 +57,7 @@ class TaskTrailing extends StatelessWidget {
         icon: Icon(LucideIcons.play, size: 20, color: palette.ink),
       ),
       DramaDownloadStatus.downloading || DramaDownloadStatus.waiting => Text(
-        dramaTaskLabel(task.status),
+        task.retryPending ? task.retryLabel : dramaTaskLabel(task.status),
         style: TextStyle(fontSize: 13, color: palette.muted),
       ),
     };

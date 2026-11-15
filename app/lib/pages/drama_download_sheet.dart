@@ -583,7 +583,11 @@ class _DramaDownloadSheetState extends State<DramaDownloadSheet> {
         key: ValueKey('download-cell-$itemId'),
         label: switch (task.status) {
           DramaDownloadStatus.downloading =>
-            progress != null ? '${(progress * 100).round()}%' : '下载中',
+            task.retryPending
+                ? task.retryLabel
+                : progress != null
+                ? '${(progress * 100).round()}%'
+                : '下载中',
           DramaDownloadStatus.waiting => '排队中',
           DramaDownloadStatus.paused => '已暂停',
           DramaDownloadStatus.failed => '失败',

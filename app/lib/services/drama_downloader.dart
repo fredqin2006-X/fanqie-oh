@@ -26,6 +26,8 @@ class DramaDownloadTask {
     this.error,
     this.auto = false,
     this.maxHeight,
+    this.retryCount = 0,
+    this.retryPending = false,
   });
 
   final String seriesId;
@@ -46,6 +48,12 @@ class DramaDownloadTask {
   /// 由 [DramaDownloader.pickVariant] 在可选集合里挑最接近的一档。
   final int? maxHeight;
 
+  /// 首次下载之外已安排的自动重试次数；手动继续时重新计数。
+  final int retryCount;
+  final bool retryPending;
+
+  String get retryLabel => '等待重试 $retryCount/${DramaDownloader.maxRetries}';
+
   double? get progress =>
       total == null || total! <= 0 ? null : (received / total!).clamp(0.0, 1.0);
 
@@ -57,6 +65,8 @@ class DramaDownloadTask {
     bool clearError = false,
     bool clearTotal = false,
     bool? auto,
+    int? retryCount,
+    bool? retryPending,
   }) => DramaDownloadTask(
     seriesId: seriesId,
     itemId: itemId,
@@ -68,6 +78,8 @@ class DramaDownloadTask {
     error: clearError ? null : (error ?? this.error),
     auto: auto ?? this.auto,
     maxHeight: maxHeight,
+    retryCount: retryCount ?? this.retryCount,
+    retryPending: retryPending ?? this.retryPending,
   );
 }
 
@@ -94,7 +106,10 @@ class DramaDownloader extends ValueNotifier<List<DramaDownloadTask>> {
   }
 
   static final DramaDownloader instance = DramaDownloader();
-  static const int _maxAttempts = 3;
+
+  /// 首次下载失败后，每隔 5 秒重试一次，最多额外尝试 3 次。
+  static const int maxRetries = 3;
+  static const Duration _retryDelay = Duration(seconds: 5);
   final DramaDownloadStore _store;
   final DownloadResumeStore _journal;
   final Future<EpisodeSource> Function(Chapter episode) _resolve;
@@ -227,6 +242,7 @@ class DramaDownloader extends ValueNotifier<List<DramaDownloadTask>> {
     task.snapshot = task.snapshot.copyWith(
       status: DramaDownloadStatus.paused,
       error: reason,
+      retryPending: false,
     );
     _publish();
     unawaited(_pump());
@@ -298,6 +314,8 @@ class DramaDownloader extends ValueNotifier<List<DramaDownloadTask>> {
     task.snapshot = task.snapshot.copyWith(
       status: DramaDownloadStatus.waiting,
       clearError: true,
+      retryCount: 0,
+      retryPending: false,
     );
   }
 
@@ -384,6 +402,7 @@ class DramaDownloader extends ValueNotifier<List<DramaDownloadTask>> {
           ? DramaDownloadStatus.paused
           : DramaDownloadStatus.failed,
       error: '清理失败：$error',
+      retryPending: false,
     );
   }
 
@@ -509,8 +528,7 @@ class DramaDownloader extends ValueNotifier<List<DramaDownloadTask>> {
         _check(key, run);
       }
       if (!await _recover(key, run)) {
-        var attempt = 0;
-        var refreshed = false;
+        var retries = 0;
         while (true) {
           _check(key, run);
           try {
@@ -572,16 +590,26 @@ class DramaDownloader extends ValueNotifier<List<DramaDownloadTask>> {
             final reason = error is Exception
                 ? audioDownloadFailureReason(error)
                 : '$error';
-            if (reason == 'stale-url' && !refreshed) {
-              refreshed = true;
-              continue;
-            }
-            if (++attempt >= _maxAttempts ||
-                !isRetryableAudioDownloadFailure(reason)) {
+            if (retries >= maxRetries ||
+                (reason != 'stale-url' &&
+                    !isRetryableAudioDownloadFailure(reason))) {
               throw DownloadTransferFailure(reason);
             }
-            await Future<void>.delayed(Duration(milliseconds: 900 * attempt));
+            task.snapshot = task.snapshot.copyWith(
+              retryCount: ++retries,
+              retryPending: true,
+              error: reason,
+            );
+            _publish();
+            // Keep the run's file reservation while waiting. Pause/discard
+            // wakes this wait immediately and cannot start a stale retry.
+            await run.waitToRetry(_retryDelay);
             _check(key, run);
+            task.snapshot = task.snapshot.copyWith(
+              retryPending: false,
+              clearError: true,
+            );
+            _publish();
           }
         }
       }
@@ -607,6 +635,7 @@ class DramaDownloader extends ValueNotifier<List<DramaDownloadTask>> {
           received: run.completedBytes,
           total: run.completedBytes,
           clearError: true,
+          retryPending: false,
         );
       }
     } on DownloadCancelled {
@@ -616,6 +645,7 @@ class DramaDownloader extends ValueNotifier<List<DramaDownloadTask>> {
         task.snapshot = task.snapshot.copyWith(
           status: DramaDownloadStatus.failed,
           error: '$error',
+          retryPending: false,
         );
       }
       debugPrint('[drama-download] ${task.snapshot.title}: $error');
@@ -938,4 +968,40 @@ class _DramaRun extends DownloadRun {
   int completedBytes = 0;
   DownloadResumeEntry? previousEntry;
   CachedEpisode? existingCached;
+  Completer<void>? _retryWait;
+  Timer? _retryTimer;
+
+  Future<void> waitToRetry(Duration delay) async {
+    check();
+    final wait = Completer<void>();
+    _retryWait = wait;
+    _retryTimer = Timer(delay, wait.complete);
+    try {
+      await wait.future;
+      check();
+    } finally {
+      _retryTimer?.cancel();
+      _retryTimer = null;
+      _retryWait = null;
+    }
+  }
+
+  void _cancelRetryWait() {
+    _retryTimer?.cancel();
+    final wait = _retryWait;
+    if (wait != null && !wait.isCompleted) wait.complete();
+  }
+
+  @override
+  bool pause() {
+    final accepted = super.pause();
+    if (accepted) _cancelRetryWait();
+    return accepted;
+  }
+
+  @override
+  void discard() {
+    super.discard();
+    _cancelRetryWait();
+  }
 }
