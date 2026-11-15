@@ -28,6 +28,7 @@ import 'home_rank_scroll_physics.dart';
 // 这里保留有限排行榜，不复制上游循环书架的虚拟名次。
 
 const double _shelfMaxWidth = 1120;
+const double _shelfBaseWidth = 520;
 
 class _ShelfGeometry {
   const _ShelfGeometry({
@@ -71,6 +72,10 @@ class _ShelfGeometry {
     width = math.min(width, _shelfMaxWidth);
     final spine = (width * 0.043).clamp(14.0, 18.0);
     final cover = (width * 0.32).clamp(100.0, 128.0);
+    final spread = (width / _shelfBaseWidth).clamp(
+      1.0,
+      _shelfMaxWidth / _shelfBaseWidth,
+    );
     final bodyHeight = (cover - 20) * 166 / 118 + 54;
     final base = cover * 0.30 + bodyHeight * 0.60 + 12;
     final naturalHeight = base + bodyHeight + 60;
@@ -80,7 +85,7 @@ class _ShelfGeometry {
     return _ShelfGeometry(
       width: width,
       spine: spine,
-      pitch: (spine + 11) * scale,
+      pitch: (spine + 11) * spread * scale,
       cover: cover,
       bodyHeight: bodyHeight,
       base: base,
